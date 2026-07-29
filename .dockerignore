@@ -1,0 +1,19 @@
+# 虚拟环境与缓存
+venv/
+__pycache__/
+*.pyc
+
+# 环境配置(密钥不打进镜像 运行时用 --env-file 注入)
+.env
+.env.*
+!.env.example
+
+# 开发工具与版本库
+.idea/
+.git/
+.gitignore
+
+# 部署无关文件
+README.md
+Dockerfile
+.dockerignore

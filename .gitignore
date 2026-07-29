@@ -1,0 +1,13 @@
+# python
+venv/
+__pycache__/
+*.pyc
+logs/
+
+# ide
+.idea/
+
+# 环境配置(含密码) 不进Git
+.env
+.env.*
+!.env.example
