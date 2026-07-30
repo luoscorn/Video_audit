@@ -102,6 +102,7 @@ async def get_task_result(
         result_data = {
             "id": result.id,
             "score": _score_to_float(result.score),
+            "full_score": rj.get("full_score"),
             "total_score": rj.get("total_score"),
             "deductions": rj.get("deductions", []),
             "deduction_count": len(rj.get("deductions", [])),

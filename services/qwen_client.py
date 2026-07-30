@@ -19,7 +19,8 @@ _MODEL = "qwen-vl-max"
 # 要求 AI 返回的 JSON 结构说明
 _OUTPUT_FORMAT = """请严格按照以下 JSON 格式返回打分结果，不要输出任何多余内容：
 {
-  "total_score": <float, 总分，满分根据评分规则中所有项分值之和确定>,
+  "full_score": <float, 满分，根据评分规则中所有项分值之和确定>,
+  "total_score": <float, 实际得分，满分减去所有扣分项之和>,
   "deductions": [
     {
       "item": "<扣分项名称，对应评分规则中的具体步骤>",
@@ -29,7 +30,7 @@ _OUTPUT_FORMAT = """请严格按照以下 JSON 格式返回打分结果，不要
   ],
   "summary": "<总体评价，概述操作规范程度和主要失分点>"
 }
-如果操作完全规范，deductions 为空数组，total_score 为满分。"""
+如果操作完全规范，deductions 为空数组，total_score 等于 full_score。"""
 
 
 def _get_client() -> OpenAI:
