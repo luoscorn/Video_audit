@@ -56,8 +56,8 @@ async def create_task(
     创建视频审核任务并自动触发后台 AI 打分
 
     入参:
-    - **audit_type**: 审核类型 必填 只能传 AuditType 枚举中的值(与 oss 目录名一致)
-    - **oss_url**: 待审核视频的oss地址 必填 最长255字符
+    - **audit_type**: 审核类型 必填 只能传 AuditType 枚举中的值
+    - **oss_url**: 待审核视频的oss地址 必填 COS路径 格式: {bucket}/{cos_key} 如 wiya-app-1346197003/video/xxx/yyy.mp4
 
     返回:
     - **data.task_id**: 新建任务id 后续用于查询结果

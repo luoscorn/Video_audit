@@ -1,5 +1,5 @@
 # Video_audit
-# Video_audit
+
 
 视频审计
 
@@ -12,3 +12,7 @@ docker run -d --name video-audit -p 8000:8000 --env-file .env.qa video-audit:lat
 
 # 运行 prod
 docker run -d --name video-audit -p 8000:8000 --env-file .env.prod -e APP_ENV=prod video-audit:latest
+
+接口文档：
+http://127.0.0.1:8000/docs
+http://127.0.0.1:8000/redoc
