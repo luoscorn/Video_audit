@@ -95,17 +95,23 @@ async def get_task_result(
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    data = {
-        "task": _task_to_dict(task),
-        "result": {
+    # 拆解 result_json，把扣分项提到顶层方便前端直接用
+    result_data = None
+    if result:
+        rj = result.result_json or {}
+        result_data = {
             "id": result.id,
             "score": _score_to_float(result.score),
-            "result_json": result.result_json,
+            "total_score": rj.get("total_score"),
+            "deductions": rj.get("deductions", []),
+            "deduction_count": len(rj.get("deductions", [])),
+            "summary": rj.get("summary", ""),
             "create_time": _format_datetime(result.create_time),
             "update_time": _format_datetime(result.update_time),
         }
-        if result
-        else None,
+    data = {
+        "task": _task_to_dict(task),
+        "result": result_data,
     }
     return {"code": 0, "msg": "success", "data": data}
 
