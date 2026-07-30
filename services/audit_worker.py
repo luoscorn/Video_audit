@@ -113,7 +113,16 @@ async def process_audit_task(task_id: int) -> None:
                 raise RuntimeError(f"AI 打分重试 {_MAX_RETRIES} 次仍失败: {last_error}")
 
             total_score = result.get("total_score", 0)
+            full_score = result.get("full_score", 0)
             deductions = result.get("deductions", [])
+
+            # 服务端校验：total_score 必须 = full_score - sum(deduct_score)
+            total_deduct = sum(float(d.get("deduct_score", 0) or 0) for d in deductions)
+            expected_score = float(full_score or 0) - total_deduct
+            if abs(float(total_score or 0) - expected_score) > 0.01:
+                print(f"[Worker]   ⚠ AI 算分有误: AI返回{total_score}, 校正为{expected_score} (满分{full_score} - 扣分{total_deduct})", flush=True)
+                result["total_score"] = expected_score
+                total_score = expected_score
 
             # 6. 保存结果 + 更新状态: 完成
             await save_audit_result(session, task_id, total_score, result)
