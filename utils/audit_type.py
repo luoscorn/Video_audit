@@ -26,6 +26,7 @@ class AuditType(str, Enum):
     MOBILITY_EXAM = "松动度检查"
     RUBBER_DAM_ISOLATION = "橡皮障隔离术"
     PERIODONTAL_PROBING = "牙周探诊"
+    TMJ_EXAM = "颞下颌关节检查"
     TOOTH_EXTRACTION = "牙拔除术"
     FLOSS_GUIDANCE = "牙线使用指导"
     PULP_VITALITY_TEST = "牙髓活力测试"
@@ -33,6 +34,8 @@ class AuditType(str, Enum):
     EXTRACTED_MOLAR_CAVITY_PREP = "离体磨牙复面洞制备术"
     PIT_FISSURE_SEALING = "窝沟封闭"
     ABSCESS_INCISION_DRAINAGE = "脓肿切开引流术"
+    MUCOSA_DISINFECTION = "黏膜消毒"
+    SUPRAGINGIVAL_SCALING = "龈上洁治"
     BLOOD_PRESSURE_MEASUREMENT = "血压测量"
     VISUAL_EXAM = "视诊检查"
 
@@ -56,6 +59,7 @@ AUDIT_SCORE_DOC: dict[AuditType, str] = {
     AuditType.MOBILITY_EXAM:               "video/松动度检查/一般检查-松动度.docx",
     AuditType.RUBBER_DAM_ISOLATION:        "video/橡皮障隔离术/橡皮障隔离术.docx",
     AuditType.PERIODONTAL_PROBING:         None,  # COS 目录为空，暂无文件
+    AuditType.TMJ_EXAM:                    "video/颞下颌关节检查/颞下颌关节检查.docx",
     AuditType.TOOTH_EXTRACTION:            "video/牙拔除术/牙拔除术.docx",
     AuditType.FLOSS_GUIDANCE:              "video/牙线使用指导/牙线使用指导.docx",
     AuditType.PULP_VITALITY_TEST:          "video/牙髓活力测试/牙髓活力测试.docx",
@@ -63,6 +67,8 @@ AUDIT_SCORE_DOC: dict[AuditType, str] = {
     AuditType.EXTRACTED_MOLAR_CAVITY_PREP: "video/离体磨牙复面洞制备术/离体磨牙复面洞制备术.docx",
     AuditType.PIT_FISSURE_SEALING:         "video/窝沟封闭/窝沟封闭操作流程.docx",
     AuditType.ABSCESS_INCISION_DRAINAGE:   "video/脓肿切开引流术/牙槽脓肿切开引流.docx",
+    AuditType.MUCOSA_DISINFECTION:         "video/黏膜消毒/口腔黏膜消毒.docx",
+    AuditType.SUPRAGINGIVAL_SCALING:       "video/龈上洁治/龈上洁治术.docx",
     AuditType.BLOOD_PRESSURE_MEASUREMENT:  "video/血压测量/测量血压.docx",
     AuditType.VISUAL_EXAM:                 "video/视诊检查/一般检查-视诊.docx",
 }
