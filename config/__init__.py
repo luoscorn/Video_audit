@@ -32,5 +32,11 @@ class Settings(BaseSettings):
     QWEN_API_KEY_1: Optional[str] = None
     QWEN_API_KEY_2: Optional[str] = None
 
+    # 腾讯云 COS
+    TENCENT_SECRET_ID: Optional[str] = None
+    TENCENT_SECRET_KEY: Optional[str] = None
+    COS_BUCKET: str = "wiya-app-1346197003"
+    COS_REGION: str = "ap-chengdu"
+
 
 settings = Settings()

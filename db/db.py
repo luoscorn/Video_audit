@@ -3,7 +3,7 @@
 # @File    : db.py
 from urllib.parse import quote_plus
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from config import settings
@@ -48,6 +48,31 @@ async def get_session() -> AsyncSession:
 
 
 # =============== 业务查询函数 ===============
+
+async def get_task(session: AsyncSession, task_id: int) -> VideoAuditTask | None:
+    """根据 ID 查询任务 不存在返回 None"""
+    result = await session.execute(
+        select(VideoAuditTask).where(VideoAuditTask.id == task_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def update_task_status(session: AsyncSession, task_id: int, status: int) -> None:
+    """更新任务状态"""
+    await session.execute(
+        update(VideoAuditTask).where(VideoAuditTask.id == task_id).values(task_status=status)
+    )
+    await session.commit()
+
+
+async def save_audit_result(session: AsyncSession, task_id: int, score: float, result_json: dict) -> int:
+    """保存打分结果到 result 表 返回 result_id"""
+    result_obj = VideoAuditTaskResult(task_id=task_id, score=score, result_json=result_json)
+    session.add(result_obj)
+    await session.commit()
+    await session.refresh(result_obj)
+    return result_obj.id
+
 
 async def create_video_audit_task(session: AsyncSession, audit_type: str, oss_url: str) -> int:
     """创建审核任务 返回 task_id"""

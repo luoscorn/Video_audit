@@ -12,7 +12,7 @@ TASK_STATUS_DESC = {0: "已接收", 1: "进行中", 2: "已完成", 3: "异常"}
 class CreateTaskReq(BaseModel):
     """创建审核任务入参"""
     audit_type: AuditType = Field(..., description="审核类型 枚举值见 AuditType")
-    oss_url: str = Field(..., max_length=255, description="oss地址")
+    oss_url: str = Field(..., max_length=255, description="COS路径 格式: {bucket}/{cos_key} 如 wiya-app-1346197003/video/xxx/yyy.mp4")
 
 
 class PageQuery(BaseModel):

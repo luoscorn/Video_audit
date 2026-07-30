@@ -4,7 +4,7 @@
 import logging
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.input import TASK_STATUS_DESC, CreateTaskReq, PageQuery
@@ -14,6 +14,7 @@ from db.db import (
     get_task_with_latest_result,
     list_video_audit_tasks,
 )
+from services.audit_worker import process_audit_task
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +49,11 @@ def _task_to_dict(task) -> dict:
 @router.post("/task", summary="创建审核任务")
 async def create_task(
     req: CreateTaskReq,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ):
     """
-    创建视频审核任务
+    创建视频审核任务并自动触发后台 AI 打分
 
     入参:
     - **audit_type**: 审核类型 必填 只能传 AuditType 枚举中的值(与 oss 目录名一致)
@@ -60,10 +62,12 @@ async def create_task(
     返回:
     - **data.task_id**: 新建任务id 后续用于查询结果
 
-    说明: 任务初始状态为 0-已接收 入库失败返回 500
+    说明: 任务初始状态为 0-已接收 创建后自动在后台触发 AI 打分流程
     """
     try:
         task_id = await create_video_audit_task(session, req.audit_type.value, req.oss_url)
+        # 创建成功后触发后台 AI 打分
+        background_tasks.add_task(process_audit_task, task_id)
         return {"code": 0, "msg": "success", "data": {"task_id": task_id}}
     except Exception:
         logger.exception("创建审核任务失败")
