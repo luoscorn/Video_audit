@@ -112,3 +112,25 @@ async def list_video_audit_tasks(session: AsyncSession, page: int, page_size: in
         .limit(page_size)
     )
     return result.scalars().all(), total or 0
+
+
+async def get_orphan_task_ids(session: AsyncSession) -> list[int]:
+    """查询所有卡在'进行中'(status=1) 的孤儿任务ID（服务崩溃遗留）"""
+    result = await session.execute(
+        select(VideoAuditTask.id).where(VideoAuditTask.task_status == 1)
+    )
+    return [row[0] for row in result.all()]
+
+
+async def reset_task_status(session: AsyncSession, task_ids: list[int], from_status: int, to_status: int) -> int:
+    """批量重置任务状态 返回受影响行数"""
+    if not task_ids:
+        return 0
+    stmt = (
+        update(VideoAuditTask)
+        .where(VideoAuditTask.id.in_(task_ids), VideoAuditTask.task_status == from_status)
+        .values(task_status=to_status)
+    )
+    result = await session.execute(stmt)
+    await session.commit()
+    return result.rowcount

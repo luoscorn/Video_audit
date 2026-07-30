@@ -11,8 +11,16 @@ from db.db import close_db, init_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理：启动时建表，关闭时释放连接池"""
+    """应用生命周期管理：启动时建表 + 恢复孤儿任务，关闭时释放连接池"""
     await init_db()
+
+    # 启动时自动恢复崩溃遗留的孤儿任务
+    from services.audit_worker import recover_orphan_tasks
+    recovered = await recover_orphan_tasks()
+    if recovered:
+        import logging
+        logging.getLogger(__name__).info("启动恢复: 已重新触发 %d 个孤儿任务", recovered)
+
     yield
     await close_db()
 
