@@ -21,7 +21,9 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    APP_ENV=qa
+    APP_ENV=qa \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
 
 # 从构建阶段拷贝已安装的依赖
 COPY --from=builder /install /usr/local
