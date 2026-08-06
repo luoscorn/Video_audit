@@ -33,11 +33,11 @@ COPY . .
 RUN useradd --no-create-home appuser && chown -R appuser /app
 USER appuser
 
-EXPOSE 8000
+EXPOSE 8022
 
 # 健康检查 复用 /health 接口
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8022/health', timeout=3)"
 
 # 启动前先同步 COS 打分规则，再启动服务
-CMD ["sh", "-c", "PYTHONPATH=. python utils/extract_score_rules.py && uvicorn main:app --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "PYTHONPATH=. python utils/extract_score_rules.py && uvicorn main:app --host 0.0.0.0 --port 8022"]
