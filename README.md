@@ -16,3 +16,4 @@ docker run -d --name video-audit -p 8000:8000 --env-file .env.prod -e APP_ENV=pr
 接口文档：
 http://127.0.0.1:8000/docs
 http://127.0.0.1:8000/redoc
+
