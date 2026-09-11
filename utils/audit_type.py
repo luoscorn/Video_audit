@@ -8,7 +8,7 @@ from config import BASE_DIR
 
 
 class AuditType(str, Enum):
-    """审核类型枚举 值与 cos 桶 video/ 下的目录名一一对应"""
+    """审核类型枚举 值与 oss 桶 video/ 下的目录名一一对应"""
     PSA_NERVE_BLOCK = "上牙槽后神经阻滞麻醉"
     MAXILLARY_IMPRESSION = "上颌印模制取"
     IA_NERVE_BLOCK = "下牙槽神经阻滞麻醉"
@@ -40,7 +40,7 @@ class AuditType(str, Enum):
     VISUAL_EXAM = "视诊检查"
 
 
-# AuditType → COS 上对应的 docx 文件 key（video/<目录>/<文件名>.docx）
+# AuditType → OSS 上对应的 docx 文件 key（video/<目录>/<文件名>.docx）
 AUDIT_SCORE_DOC: dict[AuditType, str] = {
     AuditType.PSA_NERVE_BLOCK:             "video/上牙槽后神经阻滞麻醉/上牙槽后神经阻滞麻醉.docx",
     AuditType.MAXILLARY_IMPRESSION:        "video/上颌印模制取/上下牙列印模制取.docx",
@@ -58,7 +58,7 @@ AUDIT_SCORE_DOC: dict[AuditType, str] = {
     AuditType.MODIFIED_CPI_PROBING:        "video/改良CPI探诊检查/改良社区牙周指数检查及记录.docx",
     AuditType.MOBILITY_EXAM:               "video/松动度检查/一般检查-松动度.docx",
     AuditType.RUBBER_DAM_ISOLATION:        "video/橡皮障隔离术/橡皮障隔离术.docx",
-    AuditType.PERIODONTAL_PROBING:         None,  # COS 目录为空，暂无文件
+    AuditType.PERIODONTAL_PROBING:         None,  # OSS 目录为空，暂无文件
     AuditType.TMJ_EXAM:                    "video/颞下颌关节检查/颞下颌关节检查.docx",
     AuditType.TOOTH_EXTRACTION:            "video/牙拔除术/牙拔除术.docx",
     AuditType.FLOSS_GUIDANCE:              "video/牙线使用指导/牙线使用指导.docx",
@@ -82,10 +82,10 @@ def get_score_doc_path(audit_type: AuditType, local_dir: str = "doc/score_doc") 
     :param local_dir: 本地文档目录，默认 doc/score_doc
     :return: 本地文件路径，无文件时返回 None
     """
-    cos_key = AUDIT_SCORE_DOC.get(audit_type)
-    if cos_key is None:
+    oss_key = AUDIT_SCORE_DOC.get(audit_type)
+    if oss_key is None:
         return None
-    filename = cos_key.rsplit("/", 1)[-1]
+    filename = oss_key.rsplit("/", 1)[-1]
     return str(BASE_DIR / local_dir / filename)
 
 

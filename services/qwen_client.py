@@ -46,7 +46,7 @@ def score_video(video_url: str, rule_text: str, audit_type: str) -> dict:
     """
     调用千问 qwen-vl-video 对视频进行打分
 
-    :param video_url: 视频的 COS 预签名 URL（千问 VL 可直接读取）
+    :param video_url: 视频的 OSS 预签名 URL（千问 VL 可直接读取）
     :param rule_text: 打分规则纯文本（从 doc/score_rules/ 加载）
     :param audit_type: 审核类型中文名
     :return: AI 返回的打分结果 dict，包含 total_score / deductions / summary

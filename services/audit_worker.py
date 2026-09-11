@@ -17,7 +17,7 @@ from db.db import (
 )
 from services.qwen_client import score_video
 from utils.audit_type import AuditType, get_score_rule_text
-from utils.cos_client import get_object_url
+from utils.oss_client import get_object_url
 
 logger = logging.getLogger(__name__)
 
@@ -26,17 +26,17 @@ _MAX_RETRIES = 3
 _RETRY_DELAY = 5  # 秒
 
 
-def _extract_cos_key(oss_path: str) -> str:
+def _extract_object_key(oss_path: str) -> str:
     """
-    从 COS 路径中提取对象 Key（去掉 bucket 前缀）
+    从 OSS 路径中提取对象 Key（去掉 bucket 前缀）
 
-    输入格式: {bucket}/{cos_key}
-    示例: wiya-app-1346197003/video/上牙槽后神经阻滞麻醉/xxx.mp4 → video/上牙槽后神经阻滞麻醉/xxx.mp4
+    输入格式: {bucket}/{oss_key}
+    示例: wyxtapp/video/上牙槽后神经阻滞麻醉/xxx.mp4 → video/上牙槽后神经阻滞麻醉/xxx.mp4
     """
-    # 取第一个 / 之后的部分作为 cos_key
+    # 取第一个 / 之后的部分作为 oss_key
     slash_idx = oss_path.find("/")
     if slash_idx == -1:
-        raise ValueError(f"无效的 COS 路径: {oss_path}，期望格式: {{bucket}}/{{cos_key}}")
+        raise ValueError(f"无效的 OSS 路径: {oss_path}，期望格式: {{bucket}}/{{oss_key}}")
     return oss_path[slash_idx + 1:]
 
 
@@ -46,7 +46,7 @@ async def process_audit_task(task_id: int) -> None:
 
     流程:
     1. 查任务 → 更新状态为进行中
-    2. 从 oss_url 解析 cos_key → 生成预签名 URL 给 AI
+    2. 从 oss_url 解析 oss_key → 生成预签名 URL 给 AI
     3. 加载打分规则文本
     4. 调用千问 qwen-vl-video 打分
     5. 解析结果 → 写入 result 表 → 更新状态为完成
@@ -76,9 +76,9 @@ async def process_audit_task(task_id: int) -> None:
             print(f"[Worker]   状态更新: 待处理 → 进行中", flush=True)
 
             # 3. 生成视频预签名 URL（给 AI 读视频用，有效期 2 小时）
-            cos_key = _extract_cos_key(task.oss_url)
-            video_url = get_object_url(cos_key=cos_key, expired=7200)
-            print(f"[Worker]   视频URL已生成 (cos_key={cos_key})", flush=True)
+            oss_key = _extract_object_key(task.oss_url)
+            video_url = get_object_url(oss_key=oss_key, expired=7200)
+            print(f"[Worker]   视频URL已生成 (oss_key={oss_key})", flush=True)
 
             # 4. 加载打分规则
             audit_type = AuditType(task.audit_type)
