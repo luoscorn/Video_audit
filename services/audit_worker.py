@@ -18,6 +18,7 @@ from db.db import (
 from services.qwen_client import score_video
 from utils.audit_type import AuditType, get_score_rule_text
 from utils.oss_client import get_object_url
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +31,19 @@ def _extract_object_key(oss_path: str) -> str:
     """
     从 OSS 路径中提取对象 Key（去掉 bucket 前缀）
 
-    输入格式: {bucket}/{oss_key}
-    示例: wyxtapp/video/上牙槽后神经阻滞麻醉/xxx.mp4 → video/上牙槽后神经阻滞麻醉/xxx.mp4
+    支持两种格式:
+    - {bucket}/{oss_key}  如 wyxtapp/video/上牙槽后神经阻滞麻醉/xxx.mp4 → video/上牙槽后神经阻滞麻醉/xxx.mp4
+    - {oss_key}           如 video/上牙槽后神经阻滞麻醉/xxx.mp4 → 原样返回
     """
-    # 取第一个 / 之后的部分作为 oss_key
     slash_idx = oss_path.find("/")
     if slash_idx == -1:
-        raise ValueError(f"无效的 OSS 路径: {oss_path}，期望格式: {{bucket}}/{{oss_key}}")
-    return oss_path[slash_idx + 1:]
+        raise ValueError(f"无效的 OSS 路径: {oss_path}，期望格式: {{bucket}}/{{oss_key}} 或 {{oss_key}}")
+
+    first_segment = oss_path[:slash_idx]
+    # 如果第一段是已知的 bucket 名，则去掉它；否则整个路径就是 oss_key
+    if first_segment == settings.OSS_BUCKET:
+        return oss_path[slash_idx + 1:]
+    return oss_path
 
 
 async def process_audit_task(task_id: int) -> None:
