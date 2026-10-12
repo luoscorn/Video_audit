@@ -11,8 +11,10 @@ from api.input import TASK_STATUS_DESC, CreateTaskReq, PageQuery
 from db.db import (
     create_video_audit_task,
     get_session,
+    get_task,
     get_task_with_latest_result,
     list_video_audit_tasks,
+    update_task_status,
 )
 from services.audit_worker import process_audit_task
 
@@ -72,6 +74,39 @@ async def create_task(
     except Exception:
         logger.exception("创建审核任务失败")
         raise HTTPException(status_code=500, detail="创建任务失败")
+
+
+@router.post("/task/{task_id}/retry", summary="重试审核任务")
+async def retry_task(
+    task_id: int,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    重试异常任务 重置状态并重新触发 AI 打分
+
+    路径参数:
+    - **task_id**: 任务id
+
+    可重试状态: 3-异常 或 0-已接收(未被处理过的)
+    其他状态(1-进行中 2-已完成)返回 400 任务不存在返回 404
+    """
+    task = await get_task(session, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    if not task.oss_url:
+        raise HTTPException(status_code=400, detail="任务 oss_url 为空 无法重试")
+
+    if task.task_status not in (0, 3):
+        status_desc = TASK_STATUS_DESC.get(task.task_status, "未知")
+        raise HTTPException(status_code=400, detail=f"任务当前状态为「{status_desc}」不允许重试 仅支持异常(3)/已接收(0)状态")
+
+    # worker 要求任务状态为 0 才会执行 异常任务先重置
+    if task.task_status == 3:
+        await update_task_status(session, task_id, 0)
+    background_tasks.add_task(process_audit_task, task_id)
+    return {"code": 0, "msg": "success", "data": {"task_id": task_id, "task_status": 0}}
 
 
 @router.get("/task/{task_id}/result", summary="查询任务结果")
