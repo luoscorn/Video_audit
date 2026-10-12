@@ -1,7 +1,7 @@
 # @Auther  : luoscorn
 # @Time    : 2026/7/30
 # @File    : qwen_client.py
-"""千问 VL 视频打分客户端 — 通过 OpenAI 兼容模式调用 qwen-vl-video"""
+"""千问 VL 视频打分客户端 — 通过 OpenAI 兼容模式调用 qwen3-vl-plus"""
 
 import json
 import logging
@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 
 # 千问 OpenAI 兼容端点
 _BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-_MODEL = "qwen-vl-max"
+# qwen-vl-max 已下线(model_not_found) 2026-10 实测当前可用: qwen3-vl-plus
+_MODEL = "qwen3-vl-plus"
 
 # 要求 AI 返回的 JSON 结构说明
 _OUTPUT_FORMAT = """请严格按照以下 JSON 格式返回打分结果，不要输出任何多余内容：
