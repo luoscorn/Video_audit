@@ -2,14 +2,15 @@
 # @Time    : 2026/7/30
 # @File    : extract_score_rules.py
 """
-打分规则同步脚本：从 OSS 下载 docx → 提取为纯文本 txt
+打分规则同步脚本：从 OSS 下载 docx/xlsx → docx 提取为纯文本 txt
 运行方式：PYTHONPATH=. python utils/extract_score_rules.py
 
 流程:
-  1. 列出 OSS video/ 下所有 docx 文件
+  1. 列出 OSS video/ 下所有 docx/xlsx 文件
   2. 下载到 doc/score_doc/（已存在且文件名相同则跳过）
-  3. 提取为纯文本保存到 doc/score_rules/*.txt
-  4. 自动更新 AUDIT_SCORE_DOC 映射（如有新文件）
+  3. docx 提取为纯文本保存到 doc/score_rules/*.txt
+  4. xlsx 由 utils/score_rubric.py 在打分时结构化解析 不生成 txt
+  5. 更新 utils/audit_type.py 的 AUDIT_SCORE_DOC 映射（如有新文件）
 """
 
 import os
@@ -25,6 +26,7 @@ from utils.oss_client import download_file, get_object_url, list_objects
 SCORE_DOC_DIR = BASE_DIR / "doc" / "score_doc"
 SCORE_RULES_DIR = BASE_DIR / "doc" / "score_rules"
 OSS_VIDEO_PREFIX = "video/"
+SCORE_FILE_EXTS = (".docx", ".xlsx")
 
 
 # =============== docx 解析 ===============
@@ -69,47 +71,47 @@ def extract_docx(docx_path: Path) -> str:
 
 def sync_from_oss(force: bool = False) -> list[str]:
     """
-    从 OSS 下载 video/ 下的 docx 文件到 doc/score_doc/
+    从 OSS 下载 video/ 下的 docx/xlsx 文件到 doc/score_doc/
 
     :param force: 是否强制重新下载已存在的文件
     :return: 下载的 oss_key 列表
     """
     SCORE_DOC_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 1. 列出 OSS 上所有 docx
+    # 1. 列出 OSS 上所有评分文档
     keys = list_objects(prefix=OSS_VIDEO_PREFIX, max_keys=500)
-    docx_keys = [k for k in keys if k.endswith(".docx")]
+    score_keys = [k for k in keys if k.lower().endswith(SCORE_FILE_EXTS)]
 
-    if not docx_keys:
-        print("OSS 上未找到 docx 文件")
+    if not score_keys:
+        print("OSS 上未找到 docx/xlsx 评分文件")
         return []
 
-    print(f"OSS 上找到 {len(docx_keys)} 个 docx 文件\n")
+    print(f"OSS 上找到 {len(score_keys)} 个评分文件\n")
 
     # 2. 逐个下载（已存在则跳过）
     downloaded = []
-    for i, oss_key in enumerate(docx_keys, 1):
+    for i, oss_key in enumerate(score_keys, 1):
         filename = oss_key.rsplit("/", 1)[-1]
         local_path = SCORE_DOC_DIR / filename
 
         if local_path.exists() and not force:
-            print(f"  [{i}/{len(docx_keys)}] 跳过（已存在）: {filename}")
+            print(f"  [{i}/{len(score_keys)}] 跳过（已存在）: {filename}")
             downloaded.append(oss_key)
             continue
 
         try:
             url = get_object_url(oss_key=oss_key)
             download_file(url=url, save_dir=str(SCORE_DOC_DIR), filename=filename)
-            print(f"  [{i}/{len(docx_keys)}] ✓ {filename}")
+            print(f"  [{i}/{len(score_keys)}] ✓ {filename}")
             downloaded.append(oss_key)
         except Exception as e:
-            print(f"  [{i}/{len(docx_keys)}] ✗ {oss_key}  错误: {e}")
+            print(f"  [{i}/{len(score_keys)}] ✗ {oss_key}  错误: {e}")
 
     return downloaded
 
 
 def extract_all() -> None:
-    """将 doc/score_doc/*.docx 提取为 doc/score_rules/*.txt"""
+    """将 doc/score_doc/*.docx 提取为 doc/score_rules/*.txt（xlsx 不转 txt）"""
     SCORE_RULES_DIR.mkdir(parents=True, exist_ok=True)
 
     docx_files = sorted(SCORE_DOC_DIR.glob("*.docx"))

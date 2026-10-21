@@ -15,8 +15,9 @@ from db.db import (
     save_audit_result,
     update_task_status,
 )
-from services.qwen_client import score_video
+from services.qwen_client import score_video, score_video_with_rubric
 from utils.audit_type import AuditType, get_score_rule_text
+from utils.score_rubric import get_score_rubric
 from utils.oss_client import get_object_url
 from config import settings
 
@@ -53,7 +54,7 @@ async def process_audit_task(task_id: int) -> None:
     流程:
     1. 查任务 → 更新状态为进行中
     2. 从 oss_url 解析 oss_key → 生成预签名 URL 给 AI
-    3. 加载打分规则文本
+    3. 加载打分规则（xlsx 结构化评分项 / docx 文本规则）
     4. 调用千问 qwen-vl-video 打分
     5. 解析结果 → 写入 result 表 → 更新状态为完成
     6. 异常时更新状态为异常
@@ -86,12 +87,22 @@ async def process_audit_task(task_id: int) -> None:
             video_url = get_object_url(oss_key=oss_key, expired=7200)
             print(f"[Worker]   视频URL已生成 (oss_key={oss_key})", flush=True)
 
-            # 4. 加载打分规则
+            # 4. 加载打分规则：xlsx 走结构化评分项，docx 走文本规则
             audit_type = AuditType(task.audit_type)
-            rule_text = get_score_rule_text(audit_type)
-            if rule_text is None:
-                raise ValueError(f"审核类型 '{task.audit_type}' 无对应的打分规则文件")
-            print(f"[Worker]   打分规则已加载 ({len(rule_text)} 字符)", flush=True)
+            rubric_items = get_score_rubric(audit_type)
+            rule_text = None
+            if rubric_items:
+                rubric_full_score = round(sum(item.score for item in rubric_items), 2)
+                print(
+                    f"[Worker]   打分规则已加载: 结构化 {len(rubric_items)} 项"
+                    f" (满分{rubric_full_score})",
+                    flush=True,
+                )
+            else:
+                rule_text = get_score_rule_text(audit_type)
+                if rule_text is None:
+                    raise ValueError(f"审核类型 '{task.audit_type}' 无对应的打分规则文件")
+                print(f"[Worker]   打分规则已加载: 文本 {len(rule_text)} 字符", flush=True)
 
             # 5. 调用 AI 打分（带重试）
             print(f"[Worker]   正在调用 AI 打分 (最多重试{_MAX_RETRIES}次)...", flush=True)
@@ -100,11 +111,18 @@ async def process_audit_task(task_id: int) -> None:
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
                     ai_start = time.time()
-                    result = score_video(
-                        video_url=video_url,
-                        rule_text=rule_text,
-                        audit_type=task.audit_type,
-                    )
+                    if rubric_items:
+                        result = score_video_with_rubric(
+                            video_url=video_url,
+                            rubric_items=rubric_items,
+                            audit_type=task.audit_type,
+                        )
+                    else:
+                        result = score_video(
+                            video_url=video_url,
+                            rule_text=rule_text,
+                            audit_type=task.audit_type,
+                        )
                     ai_elapsed = time.time() - ai_start
                     print(f"[Worker]   AI 返回成功 (第{attempt}次, 耗时 {ai_elapsed:.1f}s)", flush=True)
                     break

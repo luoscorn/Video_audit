@@ -141,6 +141,8 @@ async def get_task_result(
             "total_score": rj.get("total_score"),
             "deductions": rj.get("deductions", []),
             "deduction_count": len(rj.get("deductions", [])),
+            "scoring_mode": rj.get("scoring_mode", "text"),
+            "items": rj.get("items", []),
             "summary": rj.get("summary", ""),
             "create_time": _format_datetime(result.create_time),
             "update_time": _format_datetime(result.update_time),

@@ -40,7 +40,7 @@ class AuditType(str, Enum):
     VISUAL_EXAM = "视诊检查"
 
 
-# AuditType → OSS 上对应的 docx 文件 key（video/<目录>/<文件名>.docx）
+# AuditType → OSS 上对应的评分文档 key（video/<目录>/<文件名>，docx 或 xlsx）
 AUDIT_SCORE_DOC: dict[AuditType, str] = {
     AuditType.PSA_NERVE_BLOCK:             "video/上牙槽后神经阻滞麻醉/上牙槽后神经阻滞麻醉.docx",
     AuditType.MAXILLARY_IMPRESSION:        "video/上颌印模制取/上下牙列印模制取.docx",
@@ -53,7 +53,7 @@ AUDIT_SCORE_DOC: dict[AuditType, str] = {
     AuditType.OCCLUSION_EXAM:              "video/咬合关系检查/咬合关系检查.docx",
     AuditType.CPR:                         "video/心肺复苏/心肺复苏.docx",
     AuditType.PALPATION_EXAM:              "video/扪诊检查/一般检查-扪诊.docx",
-    AuditType.PROBING_EXAM:                "video/探诊检查/一般检查-探诊.docx",
+    AuditType.PROBING_EXAM:                "video/探诊检查/评分标准-探诊检查.xlsx",
     AuditType.MODIFIED_BASS_BRUSHING:      "video/改良BASS刷牙法/改良BASS刷牙法.docx",
     AuditType.MODIFIED_CPI_PROBING:        "video/改良CPI探诊检查/改良社区牙周指数检查及记录.docx",
     AuditType.MOBILITY_EXAM:               "video/松动度检查/一般检查-松动度.docx",
@@ -103,7 +103,7 @@ def get_score_rule_text(audit_type: AuditType) -> str | None:
     doc_path = get_score_doc_path(audit_type)
     if doc_path is None:
         return None
-    # docx 文件名 → 同名 txt 文件
+    # 评分文档文件名 → 同名 txt 文件
     txt_path = SCORE_RULES_DIR / (Path(doc_path).stem + ".txt")
     if not txt_path.exists():
         return None
