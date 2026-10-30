@@ -16,6 +16,7 @@ from db.db import (
     update_task_status,
 )
 from services.qwen_client import score_video, score_video_with_rubric
+from services.media_evidence import prepare_evidence
 from utils.audit_type import AuditType, get_score_rule_text
 from utils.score_rubric import get_score_rubric
 from utils.oss_client import get_object_url
@@ -54,10 +55,11 @@ async def process_audit_task(task_id: int) -> None:
     流程:
     1. 查任务 → 更新状态为进行中
     2. 从 oss_url 解析 oss_key → 生成预签名 URL 给 AI
-    3. 加载打分规则（xlsx 结构化评分项 / docx 文本规则）
-    4. 调用千问 qwen-vl-video 打分
-    5. 解析结果 → 写入 result 表 → 更新状态为完成
-    6. 异常时更新状态为异常
+    3. 视频切片抽帧 + 逐片语音转写（失败回退整段视频）
+    4. 加载打分规则（xlsx 结构化评分项 / docx 文本规则）
+    5. 调用千问按鼓励尺度打分（画面帧 + 语音提及均算完成依据）
+    6. 解析结果 → 写入 result 表 → 更新状态为完成
+    7. 异常时更新状态为异常
     """
     start_time = time.time()
     print(f"\n{'='*60}", flush=True)
@@ -86,6 +88,27 @@ async def process_audit_task(task_id: int) -> None:
             oss_key = _extract_object_key(task.oss_url)
             video_url = get_object_url(oss_key=oss_key, expired=7200)
             print(f"[Worker]   视频URL已生成 (oss_key={oss_key})", flush=True)
+
+            # 3.5 抽取打分证据：视频切片关键帧 + 逐片语音转写
+            #     失败不阻断流程 仅回退为整段视频打分
+            evidence = None
+            if settings.AUDIT_MEDIA_ENABLED:
+                media_start = time.time()
+                try:
+                    evidence = await asyncio.to_thread(prepare_evidence, video_url)
+                    print(
+                        f"[Worker]   切片抽帧+语音转写完成: {evidence.describe()}"
+                        f" (耗时 {time.time() - media_start:.1f}s)",
+                        flush=True,
+                    )
+                    transcript = evidence.transcript_text()
+                    if transcript:
+                        print(f"[Worker]   语音转写摘要: {transcript[:300]}", flush=True)
+                except Exception as exc:
+                    evidence = None
+                    print(f"[Worker]   ⚠ 切片/语音抽取失败，回退整段视频打分: {exc}", flush=True)
+            else:
+                print("[Worker]   切片/语音抽取已关闭(AUDIT_MEDIA_ENABLED=false)", flush=True)
 
             # 4. 加载打分规则：xlsx 走结构化评分项，docx 走文本规则
             audit_type = AuditType(task.audit_type)
@@ -116,12 +139,14 @@ async def process_audit_task(task_id: int) -> None:
                             video_url=video_url,
                             rubric_items=rubric_items,
                             audit_type=task.audit_type,
+                            evidence=evidence,
                         )
                     else:
                         result = score_video(
                             video_url=video_url,
                             rule_text=rule_text,
                             audit_type=task.audit_type,
+                            evidence=evidence,
                         )
                     ai_elapsed = time.time() - ai_start
                     print(f"[Worker]   AI 返回成功 (第{attempt}次, 耗时 {ai_elapsed:.1f}s)", flush=True)
@@ -129,6 +154,10 @@ async def process_audit_task(task_id: int) -> None:
                 except Exception as exc:
                     last_error = exc
                     print(f"[Worker]   AI 打分失败(第{attempt}/{_MAX_RETRIES}次): {exc}", flush=True)
+                    if evidence is not None:
+                        # 切片输入不被模型接受时 后续重试回退整段视频 避免白白失败
+                        evidence = None
+                        print("[Worker]   后续重试回退整段视频输入", flush=True)
                     if attempt < _MAX_RETRIES:
                         wait = _RETRY_DELAY * attempt
                         print(f"[Worker]   等待 {wait}s 后重试...", flush=True)

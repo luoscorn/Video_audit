@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     QWEN_API_KEY_1: Optional[str] = None
     QWEN_API_KEY_2: Optional[str] = None
 
+    # 千问模型 便于供应商下线模型时改配置而不改代码
+    QWEN_VL_MODEL: str = "qwen3-vl-plus"
+    QWEN_ASR_MODEL: str = "qwen3-asr-flash"
+
+    # 视频切片抽帧 + 语音转写开关 关闭后回退为整段视频打分
+    AUDIT_MEDIA_ENABLED: bool = True
+    # 外部 ffmpeg 可执行文件路径 为空时依次尝试 PATH 与 imageio-ffmpeg 内置二进制
+    FFMPEG_BINARY: Optional[str] = None
+
     # 阿里云 OSS
     ALIYUN_ACCESS_KEY_ID: Optional[str] = None
     ALIYUN_ACCESS_KEY_SECRET: Optional[str] = None
