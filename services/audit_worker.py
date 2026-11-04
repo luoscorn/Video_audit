@@ -17,8 +17,10 @@ from db.db import (
 )
 from services.qwen_client import score_video, score_video_with_rubric
 from services.media_evidence import prepare_evidence
-from utils.audit_type import AuditType, get_score_rule_text
-from utils.score_rubric import get_score_rubric
+from services.supplement import supplement_rescore
+from utils.audit_type import AuditType
+from utils.score_grade import attach_grade
+from utils.score_rules import load_rule_bundle
 from utils.oss_client import get_object_url
 from config import settings
 
@@ -56,7 +58,7 @@ async def process_audit_task(task_id: int) -> None:
     1. 查任务 → 更新状态为进行中
     2. 从 oss_url 解析 oss_key → 生成预签名 URL 给 AI
     3. 视频切片抽帧 + 逐片语音转写（失败回退整段视频）
-    4. 加载打分规则（xlsx 结构化评分项 / docx 文本规则）
+    4. 加载打分规则（数据库生效版优先 无生效版回落 xlsx 结构化 / docx 文本）
     5. 调用千问按严格尺度逐项打分（标有画面/语音证据才给分 未达标即扣）
     6. 解析结果 → 写入 result 表 → 更新状态为完成
     7. 异常时更新状态为异常
@@ -66,6 +68,8 @@ async def process_audit_task(task_id: int) -> None:
     print(f"[Worker] ▶ 开始处理任务 task_id={task_id}", flush=True)
 
     async with AsyncSessionLocal() as session:
+        # 本地视频临时目录持有者 任务结束时统一清理
+        media_task = None
         try:
             # 1. 查询任务
             task = await get_task(session, task_id)
@@ -95,7 +99,8 @@ async def process_audit_task(task_id: int) -> None:
             if settings.AUDIT_MEDIA_ENABLED:
                 media_start = time.time()
                 try:
-                    evidence = await asyncio.to_thread(prepare_evidence, video_url)
+                    media_task = await asyncio.to_thread(prepare_evidence, video_url)
+                    evidence = media_task
                     print(
                         f"[Worker]   切片抽帧+语音转写完成: {evidence.describe()}"
                         f" (耗时 {time.time() - media_start:.1f}s)",
@@ -110,22 +115,25 @@ async def process_audit_task(task_id: int) -> None:
             else:
                 print("[Worker]   切片/语音抽取已关闭(AUDIT_MEDIA_ENABLED=false)", flush=True)
 
-            # 4. 加载打分规则：xlsx 走结构化评分项，docx 走文本规则
+            # 4. 加载打分规则：数据库生效版优先，无生效版回落 OSS xlsx / 本地 txt
             audit_type = AuditType(task.audit_type)
-            rubric_items = get_score_rubric(audit_type)
-            rule_text = None
+            bundle = await load_rule_bundle(session, audit_type)
+            rubric_items = bundle.rubric_items
+            rule_text = bundle.text
+            version_label = f" 版本=v{bundle.version}" if bundle.version else ""
             if rubric_items:
                 rubric_full_score = round(sum(item.score for item in rubric_items), 2)
                 print(
                     f"[Worker]   打分规则已加载: 结构化 {len(rubric_items)} 项"
-                    f" (满分{rubric_full_score})",
+                    f" (满分{rubric_full_score})  来源={bundle.source}{version_label}",
                     flush=True,
                 )
             else:
-                rule_text = get_score_rule_text(audit_type)
-                if rule_text is None:
-                    raise ValueError(f"审核类型 '{task.audit_type}' 无对应的打分规则文件")
-                print(f"[Worker]   打分规则已加载: 文本 {len(rule_text)} 字符", flush=True)
+                print(
+                    f"[Worker]   打分规则已加载: 文本 {len(rule_text or '')} 字符"
+                    f"  来源={bundle.source}{version_label}",
+                    flush=True,
+                )
 
             # 5. 调用 AI 打分（带重试）
             print(f"[Worker]   正在调用 AI 打分 (最多重试{_MAX_RETRIES}次)...", flush=True)
@@ -165,6 +173,30 @@ async def process_audit_task(task_id: int) -> None:
             if result is None:
                 raise RuntimeError(f"AI 打分重试 {_MAX_RETRIES} 次仍失败: {last_error}")
 
+            # 5.5 二次补证：对证据受限的评分项切连续片段复核 失败不阻断
+            if settings.MEDIA_SUPPLEMENT_ENABLED and rubric_items and evidence is not None:
+                supplement_start = time.time()
+                try:
+                    info = await asyncio.to_thread(
+                        supplement_rescore, evidence, rubric_items, result, task.audit_type
+                    )
+                    if info is None:
+                        print("[Worker]   二次补证: 未触发或无可复核片段", flush=True)
+                    else:
+                        print(
+                            f"[Worker]   二次补证: 片段{info['clips']}个 复核{info['rechecked']}项"
+                            f" 调整{info['changed']}项 (耗时 {time.time() - supplement_start:.1f}s)",
+                            flush=True,
+                        )
+                        for change in info["changes"]:
+                            print(
+                                f"[Worker]   ~ {change['point']}: {change['from']} → {change['to']}"
+                                f" ({change['reason']})",
+                                flush=True,
+                            )
+                except Exception as exc:
+                    print(f"[Worker]   ⚠ 二次补证失败，沿用第一轮结果: {exc}", flush=True)
+
             total_score = result.get("total_score", 0)
             full_score = result.get("full_score", 0)
             deductions = result.get("deductions", [])
@@ -176,6 +208,18 @@ async def process_audit_task(task_id: int) -> None:
                 print(f"[Worker]   ⚠ AI 算分有误: AI返回{total_score}, 校正为{expected_score} (满分{full_score} - 扣分{total_deduct})", flush=True)
                 result["total_score"] = expected_score
                 total_score = expected_score
+
+            # 记录本次打分使用的规则来源与版本 便于事后追溯
+            result["rule_set"] = bundle.meta
+
+            # 按得分百分率给出等级 A(>80) / B(>60) / C / D(评分数据不完整)
+            attach_grade(result, len(rubric_items) if rubric_items else None)
+            print(
+                f"[Worker]   等级判定: {result.get('grade')}"
+                f" 百分率={result.get('score_rate')}"
+                + (f" ({result['grade_reason']})" if result.get("grade_reason") else ""),
+                flush=True,
+            )
 
             # 6. 保存结果 + 更新状态: 完成
             await save_audit_result(session, task_id, total_score, result)
@@ -200,6 +244,10 @@ async def process_audit_task(task_id: int) -> None:
                 print(f"[Worker]   状态更新: → 异常(3)", flush=True)
             except Exception:
                 logger.exception("[Worker] 更新异常状态失败 task_id=%d", task_id)
+        finally:
+            # 释放本地视频临时目录（二次补证切片依赖它，必须放到最后）
+            if media_task is not None:
+                media_task.close()
 
 
 async def recover_orphan_tasks() -> int:

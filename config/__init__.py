@@ -38,8 +38,16 @@ class Settings(BaseSettings):
 
     # 视频切片抽帧 + 语音转写开关 关闭后回退为整段视频打分
     AUDIT_MEDIA_ENABLED: bool = True
+    # 关键帧抽取: 总帧数上限与长边像素上限 直接影响画面识别粒度与 token 成本
+    MEDIA_MAX_FRAMES: int = 24
+    MEDIA_FRAME_WIDTH: int = 1024
+    # 二次补证: 仅对证据受限的评分项切连续片段重判 关闭后只用一轮关键帧
+    MEDIA_SUPPLEMENT_ENABLED: bool = True
+    MEDIA_SUPPLEMENT_CLIPS: int = 3
     # 外部 ffmpeg 可执行文件路径 为空时依次尝试 PATH 与 imageio-ffmpeg 内置二进制
     FFMPEG_BINARY: Optional[str] = None
+    # 规则管理页口令 为空则管理页禁用(用户名固定 admin)
+    ADMIN_PASSWORD: Optional[str] = None
 
     # 阿里云 OSS
     ALIYUN_ACCESS_KEY_ID: Optional[str] = None

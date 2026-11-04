@@ -1,13 +1,17 @@
 # @Auther  : luoscorn
 # @Time    : 2026/7/29: 16:30
 # @File    : db.py
+from datetime import datetime
+import logging
 from urllib.parse import quote_plus
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from config import settings
-from db.models import Base, VideoAuditTask, VideoAuditTaskResult
+from db.models import Base, ScoreRuleItem, ScoreRuleSet, VideoAuditTask, VideoAuditTaskResult
+
+logger = logging.getLogger(__name__)
 
 # 构建异步 mysql URL
 _password = quote_plus(settings.LOCAL_MYSQL_PASSWORD or "")
@@ -27,9 +31,31 @@ AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_co
 
 
 async def init_db():
-    """应用启动时调用 创建不存在的表"""
+    """应用启动时调用 创建不存在的表（已存在表的新增列由 _ensure_columns 补齐）"""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await _ensure_columns()
+
+
+_RULE_ITEM_NEW_COLUMNS = (
+    ("remark", "varchar(255) null comment '备注 写入打分提示词作为该项补充判定说明'"),
+)
+
+
+async def _ensure_columns():
+    """给已存在的 score_rule_item 补新增列 create_all 不会改动已建好的表"""
+    if engine.dialect.name != "mysql":
+        return
+    async with engine.begin() as conn:
+        for column, ddl in _RULE_ITEM_NEW_COLUMNS:
+            existing = await conn.exec_driver_sql(
+                "select column_name from information_schema.columns "
+                "where table_schema = database() and table_name = 'score_rule_item' "
+                f"and column_name = '{column}'"
+            )
+            if existing.first() is None:
+                await conn.exec_driver_sql(f"alter table score_rule_item add column {column} {ddl}")
+                logger.info("score_rule_item 补列: %s", column)
 
 
 async def close_db():
@@ -134,3 +160,117 @@ async def reset_task_status(session: AsyncSession, task_ids: list[int], from_sta
     result = await session.execute(stmt)
     await session.commit()
     return result.rowcount
+
+
+# =============== 打分规则集 ===============
+
+async def list_rule_sets(session: AsyncSession, audit_type: str | None = None) -> list[ScoreRuleSet]:
+    """查询规则集列表 按审核类型、版本倒序"""
+    stmt = select(ScoreRuleSet).order_by(ScoreRuleSet.audit_type, ScoreRuleSet.version.desc())
+    if audit_type:
+        stmt = stmt.where(ScoreRuleSet.audit_type == audit_type)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def get_rule_set(session: AsyncSession, rule_set_id: int) -> ScoreRuleSet | None:
+    """按 ID 查询规则集"""
+    return await session.get(ScoreRuleSet, rule_set_id)
+
+
+async def get_active_rule_set(session: AsyncSession, audit_type: str) -> ScoreRuleSet | None:
+    """查询某个审核类型当前生效的规则集"""
+    stmt = (
+        select(ScoreRuleSet)
+        .where(ScoreRuleSet.audit_type == audit_type, ScoreRuleSet.status == "active")
+        .order_by(ScoreRuleSet.version.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def get_latest_draft(session: AsyncSession, audit_type: str) -> ScoreRuleSet | None:
+    """查询某个审核类型最新的草稿规则集"""
+    stmt = (
+        select(ScoreRuleSet)
+        .where(ScoreRuleSet.audit_type == audit_type, ScoreRuleSet.status == "draft")
+        .order_by(ScoreRuleSet.version.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def get_rule_items(session: AsyncSession, rule_set_id: int) -> list[ScoreRuleItem]:
+    """按顺序查询规则集下的结构化评分项"""
+    stmt = (
+        select(ScoreRuleItem)
+        .where(ScoreRuleItem.rule_set_id == rule_set_id)
+        .order_by(ScoreRuleItem.sort_order, ScoreRuleItem.id)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def create_rule_draft(
+    session: AsyncSession,
+    audit_type: str,
+    kind: str,
+    source: str,
+    content: str | None = None,
+    remark: str | None = None,
+    operator: str | None = None,
+) -> ScoreRuleSet:
+    """新建草稿规则集 版本号取该类型当前最大版 +1"""
+    max_version = await session.scalar(
+        select(func.max(ScoreRuleSet.version)).where(ScoreRuleSet.audit_type == audit_type)
+    )
+    rule_set = ScoreRuleSet(
+        audit_type=audit_type,
+        version=int(max_version or 0) + 1,
+        kind=kind,
+        status="draft",
+        source=source,
+        content=content,
+        remark=remark,
+        operator=operator,
+    )
+    session.add(rule_set)
+    await session.commit()
+    await session.refresh(rule_set)
+    return rule_set
+
+
+async def save_rule_draft(
+    session: AsyncSession,
+    rule_set: ScoreRuleSet,
+    rows: list[dict],
+    content: str | None = None,
+    remark: str | None = None,
+    operator: str | None = None,
+) -> None:
+    """全量覆盖保存草稿: 评分项先删后插 保证顺序与页面一致"""
+    rule_set.remark = remark or rule_set.remark
+    rule_set.operator = operator or rule_set.operator
+    if content is not None:
+        rule_set.content = content
+    await session.execute(delete(ScoreRuleItem).where(ScoreRuleItem.rule_set_id == rule_set.id))
+    for order, row in enumerate(rows):
+        session.add(ScoreRuleItem(rule_set_id=rule_set.id, sort_order=order, **row))
+    await session.commit()
+
+
+async def publish_rule_set(session: AsyncSession, rule_set: ScoreRuleSet) -> None:
+    """发布规则集: 同类型其他生效版置为归档 本版置为生效"""
+    await session.execute(
+        update(ScoreRuleSet)
+        .where(ScoreRuleSet.audit_type == rule_set.audit_type, ScoreRuleSet.status == "active")
+        .values(status="archived", update_time=datetime.now())
+    )
+    rule_set.status = "active"
+    rule_set.published_at = datetime.now()
+    await session.commit()
+
+
+async def delete_rule_draft(session: AsyncSession, rule_set: ScoreRuleSet) -> None:
+    """删除草稿规则集及其评分项"""
+    await session.execute(delete(ScoreRuleItem).where(ScoreRuleItem.rule_set_id == rule_set.id))
+    await session.delete(rule_set)
+    await session.commit()

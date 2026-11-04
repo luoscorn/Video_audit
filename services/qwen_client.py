@@ -40,10 +40,11 @@ _SCORING_POLICY = """【评分尺度：按评分表严格判定 该扣必扣 但
    - 口述内容与画面明显矛盾（口述在 A 部位而画面在 B 部位、口述用大弯端而画面用三弯端）→ 以画面为准，给 0~20%
    - 整项既无口述也无画面迹象 → 给 0
 5. 不得因“照顾学员感受”把确实未达标的项写成满分，也不得因拍摄条件局限把合格操作判为未执行；口述完整即视为已完成，但口述与画面矛盾时以画面为准。各项判定应以有经验考官现场评分会给出的结论为基准。
-6. summary 客观陈述：列出失分点及依据并给出改进方向；不使用表扬、鼓励式表述，也不写空泛套话；口述简略且画面无证据的项要在 summary 中明确指出。"""
+6. summary 只写总体结论：用一两句话概括整体完成情况与主要失分方向（不超过 80 字），不逐条罗列失分点、不复述各扣分明细（细节放在对应 items 的 reason 里），不使用表扬、鼓励式表述，也不写空泛套话。"""
 
 # 切片输入的证据说明
-_EVIDENCE_NOTE = """【证据说明】本次输入是按时间轴切分的视频关键帧图片 + 对应片段的语音转写文本，不是完整视频。
+_EVIDENCE_NOTE = """【证据说明】本次输入是按时间轴组织的视频关键帧图片 + 对应片段的语音转写文本，不是完整视频。
+关键帧取自画面变化最明显的时刻（换器械、换部位、开始/结束动作），标签中的 @mm:ss 是该帧的准确时刻；判定时先把语音转写的时间段与该时刻对齐，再判断口述与动作是否一致，不要跨片段混用证据。
 关键帧数量有限，动作可能落在两帧之间、被遮挡或处于镜头外，这属于证据受限：按第 2 条给 60%~85% 并在 reason 注明“证据受限”，不得据此判为未执行。
 口述（语音转写）是本次考核的重要完成依据：口述把动作要素说清即视为已完成；只有口述与画面明显矛盾时，才以画面为准。"""
 
@@ -59,7 +60,7 @@ _OUTPUT_FORMAT = """请严格按照以下 JSON 格式返回打分结果，不要
       "reason": "<扣分原因，说明操作不规范之处>"
     }
   ],
-  "summary": "<总体评价，客观列出失分点及依据并给出改进方向，不使用鼓励式表述>"
+  "summary": "<总体结论，一两句话概括完成情况与主要失分方向，不逐条罗列失分点，不超过 60 字>"
 }
 重要：total_score 必须严格等于 full_score - sum(deduct_score)，请仔细核对计算。
 各项均达标时 deductions 为空数组，total_score 等于 full_score；只要有评分点未达标就必须列出对应扣分。"""
@@ -71,17 +72,20 @@ _RUBRIC_OUTPUT_FORMAT = """请严格按照以下 JSON 格式返回评分结果�
     {
       "number": "<评分项编号，如 ①>",
       "score": <float, 该项实际得分>,
+      "time": "<该评分点证据所在时刻，格式 mm:ss 或 mm:ss-mm:ss，必须取自关键帧标签中的 @mm:ss；全片无任何迹象填 无>",
       "reason": "<判定理由，说明画面或语音中可见/可闻的依据>"
     }
   ],
-  "summary": "<总体评价，客观列出失分点及依据并给出改进方向，不使用鼓励式表述>"
+  "summary": "<总体结论，一两句话概括完成情况与主要失分方向，不逐条罗列失分点，不超过 60 字>"
 }
 要求：
 1. items 必须覆盖评分规则中的全部评分项，每个编号恰好出现一次，不得遗漏、重复或编造编号。
 2. score 范围为 0 到该项分值；按给分梯度判定：达标给满分、口述完整视为已完成给 85%~100%、不到位或证据受限给 60%~85%、口述简略且画面无动作最高给 50%、明确错误或口述与画面矛盾给 0~20%、整项无任何迹象给 0，不得为凑分给出虚高分数。
 3. 不要自行计算总分，服务端会根据各项得分汇总。
 4. reason 必须引用口述原文或画面中的具体依据，不能只写“未做到”“不规范”等空泛描述。
-5. reason 用陈述句直接写判定依据与结论，不超过 100 字；禁止出现任何算式、分值换算（如 0.2×0.8=0.16）、“取上限/取下限”、自问自答或自我纠正，只给最终结论。"""
+5. reason 用陈述句直接写判定依据与结论，不超过 100 字；禁止出现任何算式、分值换算（如 0.2×0.8=0.16）、“取上限/取下限”、自问自答或自我纠正，只给最终结论。
+6. time 用于证据受限项的二次复核定位，必须直接引用关键帧标签里的 @mm:ss，不得自行推算；动作持续一段时写起止两个时刻，无法定位填 无。
+7. summary 不重复 items 里的扣分点，只给总体完成度式的结论。"""
 
 # reason 里模型常附带分数换算过程 统一剔除 只保留判定依据
 # 例: “给60%即0.12分”、“按80%×0.1=0.08分”、“四舍五入为0.15分”、“扣0.05分”、“得0.14”
@@ -238,7 +242,15 @@ def _format_rubric(rubric_items: list[RubricItem]) -> str:
         lines.append(f"{item.number} {item.point}（{item.score:g}分）")
         if item.evidence:
             lines.append(f"  视频识别依据：{item.evidence}")
+        remark = getattr(item, "remark", "")
+        if remark:
+            lines.append(f"  备注：{remark}")
     return "\n".join(lines).strip()
+
+
+def format_rubric_preview(rubric_items: list[RubricItem]) -> str:
+    """供规则管理页预览 与写入提示词的评分规则排版保持一致"""
+    return _format_rubric(rubric_items)
 
 
 def score_video_with_rubric(
@@ -321,6 +333,7 @@ def _build_rubric_result(raw_text: str, rubric_items: list[RubricItem]) -> dict:
             "point": rubric.point,
             "full_score": rubric.score,
             "score": score,
+            "time": str(raw_item.get("time", "")).strip(),   # 证据时刻 供二次补证定位
             "reason": reason,
         })
         if score < rubric.score:
@@ -345,6 +358,119 @@ def _build_rubric_result(raw_text: str, rubric_items: list[RubricItem]) -> dict:
         "summary": str(data.get("summary", "")).strip(),
         "scoring_mode": "rubric",
     }
+
+
+# 二次补证: 只看连续片段复核存疑评分项
+_SUPPLEMENT_FORMAT = """请严格按照以下 JSON 格式返回复核结果，不要输出任何多余内容：
+{
+  "items": [
+    {
+      "number": "<评分项编号>",
+      "clear": <true/false, 片段中能否清楚看到该项要求的关键动作>,
+      "score": <float, 复核后的该项得分；clear 为 false 时原样填写上一轮分数>,
+      "reason": "<判定依据，clear 为 true 时必须引用片段中的具体画面>"
+    }
+  ]
+}
+要求：
+1. 只输出【复核评分项】中列出的编号，每个恰好一次，不得增删。
+2. clear 为 false 时 score 必须与上一轮分数完全一致，不得借“看不清”加减分。
+3. score 范围为 0 到该项分值，判定尺度与第一轮完全一致。
+4. reason 用陈述句，不超过 100 字，不得出现算式或分值换算。"""
+
+_SUPPLEMENT_POLICY = """【二次复核说明】本次输入是上一轮按关键帧判定后存在证据缺口的评分项，以及按时间切出的连续视频片段（动作过程连续可见）。
+1. 先判断 clear：片段里能否看清该项要求的关键动作细节（器械、部位、手法、次数、时长、是否污染或跨越无菌区）。
+2. clear 为 true 时按评分尺度重新给分，reason 必须写出片段中看到的具体画面，不得笼统写“已完成”“规范”。
+3. clear 为 false 时保留上一轮分数，reason 说明无法确认的原因；片段没拍到不等于做得不对，也不等于做到了。
+4. 只依据随附片段与语音转写判定，不得引入第一轮之外的其他推测。"""
+
+
+def _as_bool(value) -> bool:
+    """宽松解析布尔值 兼容模型返回的字符串 true/false"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "是")
+    return bool(value)
+
+
+def rescore_with_clips(
+    audit_type: str,
+    check_items: list[dict],
+    clips: list[dict],
+) -> list[dict]:
+    """
+    二次复核: 用连续视频片段重判证据受限的评分项
+
+    :param audit_type: 审核类型中文名
+    :param check_items: 待复核评分项 每项含 number/point/evidence/full_score/score/reason/time
+    :param clips: 片段列表 每项含 label/url/transcript
+    :return: [{number, clear, score, reason}] 仅含成功解析且编号在复核范围内的项
+    """
+    if not check_items or not clips:
+        return []
+
+    lines = [f"【复核评分项】共 {len(check_items)} 项"]
+    for item in check_items:
+        lines.append(
+            f"{item['number']} {item['point']}（满分{item['full_score']:g}分，上一轮{item['score']:g}分）"
+        )
+        if item.get("evidence"):
+            lines.append(f"  视频识别依据：{item['evidence']}")
+        if item.get("remark"):
+            lines.append(f"  备注：{item['remark']}")
+        lines.append(f"  上一轮判定：{item.get('reason') or '无'}；证据时刻：{item.get('time') or '无'}")
+
+    system_prompt = "\n".join([
+        "你是一位严格、客观的口腔医学操作考核评分专家，正在对上一轮存疑的评分项做二次复核。",
+        _SCORING_POLICY,
+        "",
+        _SUPPLEMENT_POLICY,
+        "",
+        "【输出要求】",
+        _SUPPLEMENT_FORMAT,
+    ])
+
+    content: list[dict] = [{"type": "text", "text": "\n".join(lines)}]
+    for clip in clips:
+        content.append({
+            "type": "text",
+            "text": f"【片段{clip['label']}】语音转写：{clip.get('transcript') or '（该片段无语音内容）'}",
+        })
+        content.append({"type": "video_url", "video_url": {"url": clip["url"]}})
+    content.append({"type": "text", "text": "请对上述评分项逐项复核，以 JSON 格式返回结果。"})
+
+    raw_text = _call_model(system_prompt, content, audit_type)
+    return _parse_supplement(raw_text, check_items)
+
+
+def _parse_supplement(raw_text: str, check_items: list[dict]) -> list[dict]:
+    """校验二次复核返回: 忽略未知编号与无法解析的项 分数按该项分值截断"""
+    data = _parse_json(raw_text)
+    raw_items = data.get("items")
+    if not isinstance(raw_items, list):
+        raise ValueError("二次复核返回缺少 items 数组")
+
+    pending = {item["number"]: item for item in check_items}
+    results = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            continue
+        number = str(raw.get("number", "")).strip()
+        item = pending.pop(number, None)
+        if item is None:
+            continue
+        try:
+            score = float(raw.get("score"))
+        except (TypeError, ValueError):
+            continue
+        results.append({
+            "number": number,
+            "clear": _as_bool(raw.get("clear")),
+            "score": round(max(0.0, min(float(item["full_score"]), score)), 2),
+            "reason": _clean_reason(str(raw.get("reason", "")).strip()),
+        })
+    return results
 
 
 def _parse_json(text: str) -> dict:

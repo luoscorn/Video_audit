@@ -17,6 +17,7 @@ from db.db import (
     update_task_status,
 )
 from services.audit_worker import process_audit_task
+from utils.score_grade import evaluate_grade
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +123,7 @@ async def get_task_result(
 
     返回:
     - **data.task**: 任务详情 含 task_status(0-已接收 1-进行中 2-已完成 3-异常)及其描述
-    - **data.result**: 最新审核结果(score + result_json) 任务未完成时为 null
+    - **data.result**: 最新审核结果(score + grade + result_json) 任务未完成时为 null
 
     异常: 任务不存在返回 404
     """
@@ -134,11 +135,16 @@ async def get_task_result(
     result_data = None
     if result:
         rj = result.result_json or {}
+        # 历史结果可能未写入等级 按当前规则现算一次 保证前端总能拿到判定
+        grade = evaluate_grade(rj)
         result_data = {
             "id": result.id,
             "score": _score_to_float(result.score),
             "full_score": rj.get("full_score"),
             "total_score": rj.get("total_score"),
+            "score_rate": rj.get("score_rate", grade["score_rate"]),
+            "grade": rj.get("grade", grade["grade"]),
+            "grade_reason": rj.get("grade_reason", grade["grade_reason"]),
             "deductions": rj.get("deductions", []),
             "deduction_count": len(rj.get("deductions", [])),
             "scoring_mode": rj.get("scoring_mode", "text"),

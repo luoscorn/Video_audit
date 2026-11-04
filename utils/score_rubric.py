@@ -32,6 +32,7 @@ class RubricItem:
     point: str
     evidence: str
     score: float
+    remark: str = ""          # 人工备注 会作为补充说明写进打分提示词
 
     @property
     def label(self) -> str:

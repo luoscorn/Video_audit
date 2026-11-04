@@ -1,6 +1,10 @@
 # ============ 构建阶段：编译依赖(asyncmy 需要 gcc) ============
 FROM python:3.13-slim AS builder
 
+# 基础镜像 /tmp 被改成 0755 时 apt 降权到 _apt 用户会无法创建临时文件
+# 报 Unable to mkstemp /tmp/apt.sig.xxx - GetTempFile (13: Permission denied)
+RUN chmod 1777 /tmp
+
 WORKDIR /app
 
 # asyncmy 无预编译 wheel 时需要编译工具链
@@ -16,6 +20,9 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # ============ 运行阶段：只带运行时 镜像更小 ============
 FROM python:3.13-slim
+
+# 运行阶段以 appuser 运行 media_evidence 会在 /tmp 建临时目录 同样需要 1777
+RUN chmod 1777 /tmp
 
 WORKDIR /app
 

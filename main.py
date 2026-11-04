@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from api.rule_admin import router as rule_admin_router
 from api.video_audit import router as video_audit_router
 from db.db import close_db, init_db
 
@@ -28,6 +29,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Video Audit", version="1.0.0", lifespan=lifespan)
 
 app.include_router(video_audit_router)
+app.include_router(rule_admin_router)
 
 
 @app.get("/health", summary="健康检查")

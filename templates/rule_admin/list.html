@@ -1,0 +1,109 @@
+{% extends "rule_admin/base.html" %}
+{% block title %}规则集总览 · 打分规则管理{% endblock %}
+{% block content %}
+{% set ns = namespace(published=0, draft=0) %}
+{% for row in rows %}
+  {% if row.state.active %}{% set ns.published = ns.published + 1 %}{% endif %}
+  {% if row.state.draft %}{% set ns.draft = ns.draft + 1 %}{% endif %}
+{% endfor %}
+
+<div class="row-flex">
+  <div>
+    <h1>评分规则总览</h1>
+    <p class="lead">「生效版本」为打分实际使用的规则，发布后立即对新任务生效。未入库的审核类型仍走兜底链路（OSS xlsx / 镜像内置 txt）。</p>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><b>{{ ns.published }}</b><span>已入库类型</span></div>
+  <div class="stat"><b>{{ rows | length - ns.published }}</b><span>未入库（走兜底）</span></div>
+  <div class="stat"><b>{{ ns.draft }}</b><span>待发布草稿</span></div>
+  <div class="stat"><b>{{ rows | length }}</b><span>审核类型总数</span></div>
+</div>
+
+<div class="row-flex" style="margin-bottom:12px">
+  <div class="filter" id="filter">
+    <button type="button" class="on" data-filter="all">全部</button>
+    <button type="button" data-filter="published">已入库</button>
+    <button type="button" data-filter="empty">未入库</button>
+    <button type="button" data-filter="draft">有草稿</button>
+  </div>
+  <div class="search">
+    <input type="search" id="search" placeholder="搜索审核类型…" style="border-color:var(--line);background:#fff">
+  </div>
+</div>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th style="width:240px">审核类型</th>
+        <th style="width:150px">生效版本</th>
+        <th>来源</th>
+        <th style="width:150px">发布时间</th>
+        <th style="width:140px">草稿</th>
+        <th style="width:86px"></th>
+      </tr>
+    </thead>
+    <tbody id="rows">
+    {% for row in rows %}
+      {% set active = row.state.active %}
+      {% set draft = row.state.draft %}
+      <tr class="is-clickable" data-href="/admin/rules/{{ row.audit_type | urlencode }}"
+          data-state="{{ 'published' if active else 'empty' }}" data-draft="{{ '1' if draft else '0' }}"
+          data-name="{{ row.audit_type }}">
+        <td><a href="/admin/rules/{{ row.audit_type | urlencode }}">{{ row.audit_type }}</a></td>
+        {% if active %}
+          <td><span class="badge ok">v{{ active.version }}</span> <span class="hint">{{ active.kind }}</span></td>
+          <td class="hint">{{ active.source or '-' }}</td>
+          <td class="hint num">{{ active.published_at.strftime('%Y-%m-%d %H:%M') if active.published_at else '-' }}</td>
+        {% else %}
+          <td><span class="badge muted">未入库</span></td>
+          <td class="hint">兜底链路</td>
+          <td class="hint">-</td>
+        {% endif %}
+        <td>
+          {% if draft %}<span class="badge draft">v{{ draft.version }} 待发布</span>{% else %}<span class="hint">无</span>{% endif %}
+        </td>
+        <td><a class="btn" href="/admin/rules/{{ row.audit_type | urlencode }}" onclick="event.stopPropagation()">编辑</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="empty" id="empty-tip" style="display:none">没有匹配的审核类型</div>
+</div>
+
+<script>
+  var currentFilter = 'all';
+
+  function applyFilter() {
+    var keyword = (document.getElementById('search').value || '').trim();
+    var shown = 0;
+    document.querySelectorAll('#rows tr').forEach(function (tr) {
+      var okFilter = currentFilter === 'all'
+        || tr.dataset.state === currentFilter
+        || (currentFilter === 'draft' && tr.dataset.draft === '1');
+      var okKeyword = !keyword || (tr.dataset.name || '').indexOf(keyword) >= 0;
+      var show = okFilter && okKeyword;
+      tr.style.display = show ? '' : 'none';
+      if (show) shown++;
+    });
+    document.getElementById('empty-tip').style.display = shown ? 'none' : '';
+  }
+
+  document.querySelectorAll('#filter button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#filter button').forEach(function (b) { b.classList.remove('on'); });
+      btn.classList.add('on');
+      currentFilter = btn.dataset.filter;
+      applyFilter();
+    });
+  });
+
+  document.getElementById('search').addEventListener('input', applyFilter);
+
+  document.querySelectorAll('#rows tr').forEach(function (tr) {
+    tr.addEventListener('click', function () { window.location.href = tr.dataset.href; });
+  });
+</script>
+{% endblock %}

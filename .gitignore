@@ -15,4 +15,5 @@ logs/
 # 二进制/生成文件不进Git
 doc/*.mp4
 doc/score_doc/*.docx
+doc/score_doc/*.xlsx
 doc/score_rules/

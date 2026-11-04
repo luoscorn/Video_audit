@@ -101,6 +101,16 @@ def get_object_url(
     return bucket_obj.sign_url("GET", oss_key, expired, slash_safe=True)
 
 
+def delete_object(oss_key: str, bucket: Optional[str] = None) -> None:
+    """
+    删除 OSS 对象 用于清理上传的临时文件
+
+    :param oss_key: OSS 上的对象键(路径)
+    :param bucket: 存储桶名称，默认使用配置中的 OSS_BUCKET
+    """
+    get_oss_bucket(bucket).delete_object(oss_key)
+
+
 def object_stat(oss_key: str, bucket: Optional[str] = None) -> Optional[int]:
     """
     查询 OSS 对象大小

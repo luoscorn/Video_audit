@@ -1,0 +1,242 @@
+{% extends "rule_admin/base.html" %}
+{% block title %}{{ audit_type }} · 打分规则管理{% endblock %}
+
+{% macro item_table(rows, editable) %}
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th style="width:44px">#</th>
+        <th style="width:170px">一级维度</th>
+        <th style="width:84px">编号</th>
+        <th style="width:26%">细分评分点</th>
+        <th>视频识别依据</th>
+        <th style="width:180px">备注</th>
+        <th style="width:84px">分值</th>
+        <th style="width:44px"></th>
+      </tr>
+    </thead>
+    <tbody id="items-body">
+    {% for row in rows %}
+      <tr>
+        <td class="idx">{{ loop.index }}</td>
+        <td><input name="dimension" value="{{ row.dimension or '' }}" {% if not editable %}disabled{% endif %}></td>
+        <td><input name="number" class="num" value="{{ row.number or '' }}" {% if not editable %}disabled{% endif %}></td>
+        <td><input name="point" value="{{ row.point or '' }}" {% if not editable %}disabled{% endif %}></td>
+        <td><input name="evidence" value="{{ row.evidence or '' }}" {% if not editable %}disabled{% endif %}></td>
+        <td><input name="remark" class="note" value="{{ row.remark or '' }}" placeholder="补充说明 会写进提示词" {% if not editable %}disabled{% endif %}></td>
+        <td><input name="score" class="score" value="{{ row.score }}" {% if not editable %}disabled{% endif %}></td>
+        <td class="op">{% if editable %}<button type="button" class="del" title="删除该行" onclick="this.closest('tr').remove(); renumber(); recalc()">×</button>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if not rows %}
+    <div class="empty">还没有评分项，点下面的「+ 新增评分项」开始录入</div>
+  {% endif %}
+</div>
+{% endmacro %}
+
+{% block content %}
+<div class="row-flex">
+  <div>
+    <h1>{{ audit_type }}</h1>
+    <div class="bar" style="margin-top:8px">
+      {% if active %}
+        <span class="chip">生效 <b>v{{ active.version }}</b> · {{ active.kind }} · 来源 {{ active.source or '-' }} · 发布 {{ active.published_at.strftime('%Y-%m-%d %H:%M') if active.published_at else '-' }}</span>
+      {% else %}
+        <span class="chip">尚未入库 · 打分仍走 OSS xlsx / 镜像内置 txt 兜底</span>
+      {% endif %}
+      {% if draft %}
+        <span class="chip">草稿 <b>v{{ draft.version }}</b> · 未发布，不影响打分</span>
+      {% else %}
+        <span class="chip">无草稿</span>
+      {% endif %}
+    </div>
+  </div>
+  <a class="btn" href="/admin/rules">← 返回总览</a>
+</div>
+
+{% if error %}<div class="err"><span class="ico">!</span><span>{{ error }}</span></div>{% endif %}
+
+{% if not draft %}
+  <div class="card">
+    <div class="card-body">
+      <div class="actions" style="margin-top:0">
+        <form method="post" action="/admin/rules/{{ audit_type | urlencode }}/create">
+          <button class="primary">新建空白结构化草稿</button>
+        </form>
+        {% if active and active.kind == 'rubric' %}
+          <form method="post" action="/admin/rules/{{ audit_type | urlencode }}/derive">
+            <button>从生效版 v{{ active.version }} 派生草稿</button>
+          </form>
+        {% endif %}
+      </div>
+      <p class="hint" style="margin:0">没有草稿时下方展示的是当前生效版本（只读）。要修改请新建空白草稿逐行录入，或从生效版派生；尚未入库的审核类型打分仍走 OSS xlsx / 镜像内置 txt。</p>
+    </div>
+  </div>
+{% endif %}
+
+{% if draft %}
+<form method="post" action="/admin/rules/{{ audit_type | urlencode }}/save" id="edit-form">
+  <input type="hidden" name="rule_set_id" value="{{ draft.id }}">
+  <input type="hidden" name="kind" value="{{ kind }}">
+
+  <div class="card" style="margin-top:14px">
+    <div class="card-body">
+      <div class="field">
+        <label>变更说明</label>
+        <input name="change_note" value="{{ draft.remark or '' }}" placeholder="例如：第 3 项分值由 2 改为 3">
+      </div>
+    </div>
+  </div>
+
+  {% if kind == 'rubric' %}
+    <div style="margin-top:16px">{{ item_table(rows, true) }}</div>
+  {% else %}
+    <p class="notice" style="margin-top:14px"><span class="ico">i</span><span>文本模式：整段规则会原样作为打分提示词中的规则部分，修改后建议先预览。</span></p>
+    <textarea name="content" rows="30" class="text">{{ content }}</textarea>
+  {% endif %}
+</form>
+
+<div class="toolbar">
+  {% if kind == 'rubric' %}
+    <button type="button" onclick="addRow()">+ 新增评分项</button>
+    <span class="chip">合计满分 <b id="total">{{ total_score }}</b></span>
+    <span class="hint">备注会以「备注：…」写入打分提示词</span>
+  {% endif %}
+  <span class="spacer"></span>
+  <a class="btn" href="/admin/rules/{{ audit_type | urlencode }}/preview">预览提示词</a>
+  <form method="post" action="/admin/rules/{{ audit_type | urlencode }}/delete"
+        onsubmit="return confirm('确认删除草稿 v{{ draft.version }}？')">
+    <input type="hidden" name="rule_set_id" value="{{ draft.id }}">
+    <button class="danger">删除草稿</button>
+  </form>
+  <form method="post" action="/admin/rules/{{ audit_type | urlencode }}/publish"
+        onsubmit="return confirm('发布后立即对新打分任务生效，原生效版将归档。确认发布 v{{ draft.version }}？')">
+    <input type="hidden" name="rule_set_id" value="{{ draft.id }}">
+    <button class="primary">发布 v{{ draft.version }}</button>
+  </form>
+  <button type="submit" form="edit-form" class="primary">保存草稿</button>
+</div>
+
+{% elif target %}
+  <h2>当前生效内容（只读）</h2>
+  {% if kind == 'rubric' %}
+    {{ item_table(rows, false) }}
+    <div class="actions"><span class="chip">合计满分 <b>{{ total_score }}</b></span></div>
+  {% else %}
+    <textarea rows="30" class="text" disabled>{{ content }}</textarea>
+  {% endif %}
+{% endif %}
+
+{% if preview is not none %}
+  <div class="preview-head">
+    <h2>提示词预览</h2>
+    <button type="button" onclick="copyPreview(this)">复制</button>
+  </div>
+  <pre class="preview" id="preview-text">{{ preview }}</pre>
+{% endif %}
+
+<h2>版本历史</h2>
+{% if history %}
+<div class="table-wrap" style="max-height:none">
+  <table>
+    <thead>
+      <tr>
+        <th style="width:74px">版本</th>
+        <th style="width:96px">状态</th>
+        <th style="width:84px">类型</th>
+        <th style="width:120px">来源</th>
+        <th>变更说明</th>
+        <th style="width:100px">操作人</th>
+        <th style="width:150px">更新时间</th>
+        <th style="width:150px">发布时间</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for rule_set in history %}
+      <tr>
+        <td class="num"><b>v{{ rule_set.version }}</b></td>
+        <td>
+          {% if rule_set.status == 'active' %}<span class="badge ok">生效</span>
+          {% elif rule_set.status == 'draft' %}<span class="badge draft">草稿</span>
+          {% else %}<span class="badge archived">归档</span>{% endif %}
+        </td>
+        <td class="hint">{{ rule_set.kind }}</td>
+        <td class="hint">{{ rule_set.source or '-' }}</td>
+        <td>{{ rule_set.remark or '' }}</td>
+        <td class="hint">{{ rule_set.operator or '-' }}</td>
+        <td class="hint num">{{ rule_set.update_time.strftime('%Y-%m-%d %H:%M') if rule_set.update_time else '-' }}</td>
+        <td class="hint num">{{ rule_set.published_at.strftime('%Y-%m-%d %H:%M') if rule_set.published_at else '-' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+  <div class="card"><div class="empty">该审核类型还没有任何规则版本。</div></div>
+{% endif %}
+
+<script>
+  function renumber() {
+    document.querySelectorAll('#items-body tr').forEach(function (tr, i) {
+      tr.querySelector('.idx').textContent = i + 1;
+    });
+  }
+
+  function recalc() {
+    var total = 0;
+    document.querySelectorAll('#items-body .score').forEach(function (el) {
+      total += parseFloat(el.value) || 0;
+    });
+    var box = document.getElementById('total');
+    if (box) box.textContent = Math.round(total * 100) / 100;
+  }
+
+  function addRow() {
+    var body = document.getElementById('items-body');
+    if (!body) return;
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td class="idx"></td>'
+      + '<td><input name="dimension"></td>'
+      + '<td><input name="number" class="num"></td>'
+      + '<td><input name="point"></td>'
+      + '<td><input name="evidence"></td>'
+      + '<td><input name="remark" class="note" placeholder="补充说明 会写进提示词"></td>'
+      + '<td><input name="score" class="score" value="1"></td>'
+      + '<td class="op"><button type="button" class="del" title="删除该行" onclick="this.closest(\'tr\').remove(); renumber(); recalc()">×</button></td>';
+    body.appendChild(tr);
+    renumber();
+    recalc();
+    var first = tr.querySelector('input[name="number"]');
+    if (first) first.focus();
+  }
+
+  function copyPreview(btn) {
+    var el = document.getElementById('preview-text');
+    if (!el) return;
+    var text = el.textContent;
+    var done = function () {
+      var old = btn.textContent;
+      btn.textContent = '已复制';
+      setTimeout(function () { btn.textContent = old; }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () {});
+    } else {
+      var range = document.createRange();
+      range.selectNodeContents(el);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.execCommand('copy');
+      done();
+    }
+  }
+
+  document.addEventListener('input', function (e) {
+    if (e.target.classList && e.target.classList.contains('score')) recalc();
+  });
+</script>
+{% endblock %}
