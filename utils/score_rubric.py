@@ -4,6 +4,7 @@
 """xlsx 评分标准 → 结构化评分项"""
 
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +14,10 @@ from utils.audit_type import AUDIT_SCORE_DOC, AuditType, get_score_doc_path
 from utils.oss_client import download_file, get_object_url
 
 logger = logging.getLogger(__name__)
+
+# OSS xlsx 解析结果的进程内缓存 避免每个任务都拉一次 OSS
+# 规则以数据库生效版为主 这里的 xlsx 只是兜底 容忍一定时限的旧版
+_RUBRIC_TTL_SECONDS = 600
 
 _HEADER_NAMES = {
     "dimension": "一级维度",
@@ -37,6 +42,10 @@ class RubricItem:
     @property
     def label(self) -> str:
         return f"{self.number} {self.point}"
+
+
+# 解析结果缓存: audit_type -> (写入时间, 评分项)
+_rubric_cache: dict[AuditType, tuple[float, list[RubricItem]]] = {}
 
 
 def _cell_text(value) -> str:
@@ -118,8 +127,20 @@ def get_score_rubric(audit_type: AuditType) -> list[RubricItem] | None:
     """
     获取结构化评分项（仅 xlsx 标准）；docx 标准返回 None，沿用文本规则
 
-    每次从 OSS 拉取最新 xlsx，下载失败时回退本地缓存
+    带进程内 TTL 缓存 避免每个任务都从 OSS 拉一次 xlsx
     """
+    cached = _rubric_cache.get(audit_type)
+    if cached is not None and time.time() - cached[0] < _RUBRIC_TTL_SECONDS:
+        return cached[1]
+
+    items = _load_score_rubric(audit_type)
+    if items:
+        _rubric_cache[audit_type] = (time.time(), items)
+    return items
+
+
+def _load_score_rubric(audit_type: AuditType) -> list[RubricItem] | None:
+    """从 OSS 拉取最新 xlsx 并解析 下载失败时回退本地缓存"""
     oss_key = AUDIT_SCORE_DOC.get(audit_type)
     if not oss_key or not oss_key.lower().endswith(".xlsx"):
         return None

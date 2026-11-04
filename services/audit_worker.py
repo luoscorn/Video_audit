@@ -30,6 +30,21 @@ logger = logging.getLogger(__name__)
 _MAX_RETRIES = 3
 _RETRY_DELAY = 5  # 秒
 
+# 同时进行的打分任务上限 避免多任务并发吃满 CPU/带宽/千问配额
+_MAX_CONCURRENT_TASKS = 3
+_task_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_TASKS)
+
+# 错误信息命中这些关键词说明多模态输入本身被拒 才回退整段视频
+_INPUT_REJECT_KEYWORDS = ("image", "multimodal", "invalid_parameter", "unsupported", "data_inspection")
+
+
+def _is_input_rejected(exc: Exception) -> bool:
+    """判断失败是否由“关键帧输入被模型拒绝”引起 限流/超时/网络类错误保留证据重试"""
+    if getattr(exc, "status_code", None) == 400:
+        return True
+    message = str(exc).lower()
+    return any(keyword in message for keyword in _INPUT_REJECT_KEYWORDS)
+
 
 def _extract_object_key(oss_path: str) -> str:
     """
@@ -51,6 +66,16 @@ def _extract_object_key(oss_path: str) -> str:
 
 
 async def process_audit_task(task_id: int) -> None:
+    """后台处理入口 先用信号量排队 再进入实际打分流程"""
+    if _task_semaphore.locked():
+        logger.warning(
+            "[Worker] 并发已满(%d) task_id=%d 排队等待", _MAX_CONCURRENT_TASKS, task_id
+        )
+    async with _task_semaphore:
+        await _process_audit_task(task_id)
+
+
+async def _process_audit_task(task_id: int) -> None:
     """
     后台处理视频审核任务（由 BackgroundTasks 调度）
 
@@ -64,8 +89,7 @@ async def process_audit_task(task_id: int) -> None:
     7. 异常时更新状态为异常
     """
     start_time = time.time()
-    print(f"\n{'='*60}", flush=True)
-    print(f"[Worker] ▶ 开始处理任务 task_id={task_id}", flush=True)
+    logger.info("\n%s\n[Worker] 开始处理任务 task_id=%d", "=" * 60, task_id)
 
     async with AsyncSessionLocal() as session:
         # 本地视频临时目录持有者 任务结束时统一清理
@@ -74,24 +98,27 @@ async def process_audit_task(task_id: int) -> None:
             # 1. 查询任务
             task = await get_task(session, task_id)
             if task is None:
-                print(f"[Worker] ✗ 任务不存在 task_id={task_id}", flush=True)
+                logger.warning("[Worker] 任务不存在 task_id=%d", task_id)
                 return
 
             if task.task_status != 0:
-                print(f"[Worker] ✗ 任务状态异常 task_id={task_id}, status={task.task_status}", flush=True)
+                logger.warning(
+                    "[Worker] 任务状态异常 task_id=%d status=%d", task_id, task.task_status
+                )
                 return
 
-            print(f"[Worker]   审核类型: {task.audit_type}", flush=True)
-            print(f"[Worker]   OSS路径:  {task.oss_url}", flush=True)
+            logger.info(
+                "[Worker]   审核类型: %s  OSS路径: %s", task.audit_type, task.oss_url
+            )
 
             # 2. 更新状态: 进行中
             await update_task_status(session, task_id, 1)
-            print(f"[Worker]   状态更新: 待处理 → 进行中", flush=True)
+            logger.info("[Worker]   状态更新: 待处理 → 进行中")
 
             # 3. 生成视频预签名 URL（给 AI 读视频用，有效期 2 小时）
             oss_key = _extract_object_key(task.oss_url)
             video_url = get_object_url(oss_key=oss_key, expired=7200)
-            print(f"[Worker]   视频URL已生成 (oss_key={oss_key})", flush=True)
+            logger.info("[Worker]   视频URL已生成 (oss_key=%s)", oss_key)
 
             # 3.5 抽取打分证据：视频切片关键帧 + 逐片语音转写
             #     失败不阻断流程 仅回退为整段视频打分
@@ -101,19 +128,19 @@ async def process_audit_task(task_id: int) -> None:
                 try:
                     media_task = await asyncio.to_thread(prepare_evidence, video_url)
                     evidence = media_task
-                    print(
-                        f"[Worker]   切片抽帧+语音转写完成: {evidence.describe()}"
-                        f" (耗时 {time.time() - media_start:.1f}s)",
-                        flush=True,
+                    logger.info(
+                        "[Worker]   切片抽帧+语音转写完成: %s (耗时 %.1fs)",
+                        evidence.describe(),
+                        time.time() - media_start,
                     )
                     transcript = evidence.transcript_text()
                     if transcript:
-                        print(f"[Worker]   语音转写摘要: {transcript[:300]}", flush=True)
+                        logger.debug("[Worker]   语音转写摘要: %s", transcript[:300])
                 except Exception as exc:
                     evidence = None
-                    print(f"[Worker]   ⚠ 切片/语音抽取失败，回退整段视频打分: {exc}", flush=True)
+                    logger.warning("[Worker]   切片/语音抽取失败 回退整段视频打分: %s", exc)
             else:
-                print("[Worker]   切片/语音抽取已关闭(AUDIT_MEDIA_ENABLED=false)", flush=True)
+                logger.info("[Worker]   切片/语音抽取已关闭(AUDIT_MEDIA_ENABLED=false)")
 
             # 4. 加载打分规则：数据库生效版优先，无生效版回落 OSS xlsx / 本地 txt
             audit_type = AuditType(task.audit_type)
@@ -123,52 +150,58 @@ async def process_audit_task(task_id: int) -> None:
             version_label = f" 版本=v{bundle.version}" if bundle.version else ""
             if rubric_items:
                 rubric_full_score = round(sum(item.score for item in rubric_items), 2)
-                print(
-                    f"[Worker]   打分规则已加载: 结构化 {len(rubric_items)} 项"
-                    f" (满分{rubric_full_score})  来源={bundle.source}{version_label}",
-                    flush=True,
+                logger.info(
+                    "[Worker]   打分规则已加载: 结构化 %d 项 (满分%s)  来源=%s%s",
+                    len(rubric_items),
+                    rubric_full_score,
+                    bundle.source,
+                    version_label,
                 )
             else:
-                print(
-                    f"[Worker]   打分规则已加载: 文本 {len(rule_text or '')} 字符"
-                    f"  来源={bundle.source}{version_label}",
-                    flush=True,
+                logger.info(
+                    "[Worker]   打分规则已加载: 文本 %d 字符  来源=%s%s",
+                    len(rule_text or ""),
+                    bundle.source,
+                    version_label,
                 )
 
             # 5. 调用 AI 打分（带重试）
-            print(f"[Worker]   正在调用 AI 打分 (最多重试{_MAX_RETRIES}次)...", flush=True)
+            logger.info("[Worker]   正在调用 AI 打分 (最多重试%d次)...", _MAX_RETRIES)
             result = None
             last_error = None
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
                     ai_start = time.time()
+                    # 打分是同步 HTTP 调用 必须放线程池执行 否则会阻塞事件循环导致其它接口全部卡死
                     if rubric_items:
-                        result = score_video_with_rubric(
+                        result = await asyncio.to_thread(
+                            score_video_with_rubric,
                             video_url=video_url,
                             rubric_items=rubric_items,
                             audit_type=task.audit_type,
                             evidence=evidence,
                         )
                     else:
-                        result = score_video(
+                        result = await asyncio.to_thread(
+                            score_video,
                             video_url=video_url,
                             rule_text=rule_text,
                             audit_type=task.audit_type,
                             evidence=evidence,
                         )
                     ai_elapsed = time.time() - ai_start
-                    print(f"[Worker]   AI 返回成功 (第{attempt}次, 耗时 {ai_elapsed:.1f}s)", flush=True)
+                    logger.info("[Worker]   AI 返回成功 (第%d次 耗时 %.1fs)", attempt, ai_elapsed)
                     break
                 except Exception as exc:
                     last_error = exc
-                    print(f"[Worker]   AI 打分失败(第{attempt}/{_MAX_RETRIES}次): {exc}", flush=True)
-                    if evidence is not None:
-                        # 切片输入不被模型接受时 后续重试回退整段视频 避免白白失败
+                    logger.warning("[Worker]   AI 打分失败(第%d/%d次): %s", attempt, _MAX_RETRIES, exc)
+                    if evidence is not None and _is_input_rejected(exc):
+                        # 仅当关键帧输入被拒时才回退整段视频 限流/超时保留证据重试
                         evidence = None
-                        print("[Worker]   后续重试回退整段视频输入", flush=True)
+                        logger.warning("[Worker]   关键帧输入被拒 后续重试回退整段视频")
                     if attempt < _MAX_RETRIES:
                         wait = _RETRY_DELAY * attempt
-                        print(f"[Worker]   等待 {wait}s 后重试...", flush=True)
+                        logger.info("[Worker]   等待 %ds 后重试...", wait)
                         await asyncio.sleep(wait)
             if result is None:
                 raise RuntimeError(f"AI 打分重试 {_MAX_RETRIES} 次仍失败: {last_error}")
@@ -181,21 +214,25 @@ async def process_audit_task(task_id: int) -> None:
                         supplement_rescore, evidence, rubric_items, result, task.audit_type
                     )
                     if info is None:
-                        print("[Worker]   二次补证: 未触发或无可复核片段", flush=True)
+                        logger.info("[Worker]   二次补证: 未触发或无可复核片段")
                     else:
-                        print(
-                            f"[Worker]   二次补证: 片段{info['clips']}个 复核{info['rechecked']}项"
-                            f" 调整{info['changed']}项 (耗时 {time.time() - supplement_start:.1f}s)",
-                            flush=True,
+                        logger.info(
+                            "[Worker]   二次补证: 片段%d个 复核%d项 调整%d项 (耗时 %.1fs)",
+                            info["clips"],
+                            info["rechecked"],
+                            info["changed"],
+                            time.time() - supplement_start,
                         )
                         for change in info["changes"]:
-                            print(
-                                f"[Worker]   ~ {change['point']}: {change['from']} → {change['to']}"
-                                f" ({change['reason']})",
-                                flush=True,
+                            logger.info(
+                                "[Worker]   ~ %s: %s → %s (%s)",
+                                change["point"],
+                                change["from"],
+                                change["to"],
+                                change["reason"],
                             )
                 except Exception as exc:
-                    print(f"[Worker]   ⚠ 二次补证失败，沿用第一轮结果: {exc}", flush=True)
+                    logger.warning("[Worker]   二次补证失败 沿用第一轮结果: %s", exc)
 
             total_score = result.get("total_score", 0)
             full_score = result.get("full_score", 0)
@@ -205,7 +242,13 @@ async def process_audit_task(task_id: int) -> None:
             total_deduct = sum(float(d.get("deduct_score", 0) or 0) for d in deductions)
             expected_score = float(full_score or 0) - total_deduct
             if abs(float(total_score or 0) - expected_score) > 0.01:
-                print(f"[Worker]   ⚠ AI 算分有误: AI返回{total_score}, 校正为{expected_score} (满分{full_score} - 扣分{total_deduct})", flush=True)
+                logger.warning(
+                    "[Worker]   AI 算分有误: 返回%s 校正为%s (满分%s - 扣分%s)",
+                    total_score,
+                    expected_score,
+                    full_score,
+                    total_deduct,
+                )
                 result["total_score"] = expected_score
                 total_score = expected_score
 
@@ -214,34 +257,43 @@ async def process_audit_task(task_id: int) -> None:
 
             # 按得分百分率给出等级 A(>80) / B(>60) / C / D(评分数据不完整)
             attach_grade(result, len(rubric_items) if rubric_items else None)
-            print(
-                f"[Worker]   等级判定: {result.get('grade')}"
-                f" 百分率={result.get('score_rate')}"
-                + (f" ({result['grade_reason']})" if result.get("grade_reason") else ""),
-                flush=True,
+            logger.info(
+                "[Worker]   等级判定: %s 百分率=%s%s",
+                result.get("grade"),
+                result.get("score_rate"),
+                f" ({result['grade_reason']})" if result.get("grade_reason") else "",
             )
 
-            # 6. 保存结果 + 更新状态: 完成
-            await save_audit_result(session, task_id, total_score, result)
-            await update_task_status(session, task_id, 2)
+            # 6. 保存结果 + 更新状态: 完成(同一事务 避免结果落库但状态卡在进行中)
+            await save_audit_result(session, task_id, total_score, result, status=2)
 
             elapsed = time.time() - start_time
-            print(f"[Worker] ✓ 任务完成 task_id={task_id}  总分={total_score}  扣分项={len(deductions)}个  总耗时={elapsed:.1f}s", flush=True)
-            if deductions:
-                for d in deductions:
-                    print(f"[Worker]   - {d.get('item', '?')}: 扣{d.get('deduct_score', 0)}分 ({d.get('reason', '')})", flush=True)
+            logger.info(
+                "[Worker] 任务完成 task_id=%d  总分=%s  扣分项=%d个  总耗时=%.1fs\n%s",
+                task_id,
+                total_score,
+                len(deductions),
+                elapsed,
+                "=" * 60,
+            )
+            for d in deductions:
+                logger.info(
+                    "[Worker]   - %s: 扣%s分 (%s)",
+                    d.get("item", "?"),
+                    d.get("deduct_score", 0),
+                    d.get("reason", ""),
+                )
             summary = result.get("summary", "")
             if summary:
-                print(f"[Worker]   评价: {summary}", flush=True)
-            print(f"{'='*60}\n", flush=True)
+                logger.info("[Worker]   评价: %s", summary)
 
         except Exception as e:
             elapsed = time.time() - start_time
-            print(f"[Worker] ✗ 任务异常 task_id={task_id}  耗时={elapsed:.1f}s  错误: {e}", flush=True)
+            logger.error("[Worker] 任务异常 task_id=%d  耗时=%.1fs  错误: %s", task_id, elapsed, e)
             logger.exception("[Worker] 任务处理异常 task_id=%d", task_id)
             try:
                 await update_task_status(session, task_id, 3)
-                print(f"[Worker]   状态更新: → 异常(3)", flush=True)
+                logger.info("[Worker]   状态更新: → 异常(3)")
             except Exception:
                 logger.exception("[Worker] 更新异常状态失败 task_id=%d", task_id)
         finally:
@@ -259,14 +311,16 @@ async def recover_orphan_tasks() -> int:
     async with AsyncSessionLocal() as session:
         orphan_ids = await get_orphan_task_ids(session)
         if not orphan_ids:
-            print("[Recovery] 启动检查: 无孤儿任务", flush=True)
+            logger.info("[Recovery] 启动检查: 无孤儿任务")
             return 0
 
         count = await reset_task_status(session, orphan_ids, from_status=1, to_status=0)
-        print(f"[Recovery] 发现 {len(orphan_ids)} 个孤儿任务，已重置 {count} 个，正在重新触发...", flush=True)
+        logger.warning(
+            "[Recovery] 发现 %d 个孤儿任务 已重置 %d 个 正在重新触发", len(orphan_ids), count
+        )
 
     for task_id in orphan_ids:
-        print(f"[Recovery]   → 重新触发 task_id={task_id}", flush=True)
+        logger.info("[Recovery]   → 重新触发 task_id=%d", task_id)
         asyncio.create_task(process_audit_task(task_id))
 
     return len(orphan_ids)

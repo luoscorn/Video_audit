@@ -41,7 +41,7 @@ create table score_rule_item(
     number varchar(16) not null comment '评分项编号',
     point varchar(255) not null comment '细分评分点',
     evidence varchar(500) null comment '视频识别依据',
-    remark varchar(255) null comment '备注 写入打分提示词作为该项补充判定说明',
+    remark text null comment '备注 写入打分提示词作为该项补充判定说明',
     score decimal(6,2) not null comment '分值',
     sort_order int default 0 comment '展示与提示词中的顺序',
     key idx_rule_set_id (rule_set_id)

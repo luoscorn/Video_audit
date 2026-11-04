@@ -78,7 +78,7 @@ class ScoreRuleItem(Base):
     number = Column(String(16), nullable=False, comment="评分项编号")
     point = Column(String(255), nullable=False, comment="细分评分点")
     evidence = Column(String(500), comment="视频识别依据")
-    remark = Column(String(255), comment="备注 写入打分提示词作为该项补充判定说明")
+    remark = Column(Text, comment="备注 写入打分提示词作为该项补充判定说明")
     score = Column(Numeric(6, 2), nullable=False, comment="分值")
     sort_order = Column(Integer, default=0, comment="展示与提示词中的顺序")
 

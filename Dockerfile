@@ -44,9 +44,9 @@ USER appuser
 
 EXPOSE 8022
 
-# 健康检查 复用 /health 接口
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8022/health', timeout=3)"
+# 健康检查(含数据库探活) 启动时要先同步 OSS 规则 故 start-period 放宽
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8022/health', timeout=8)"
 
 # 启动前先同步 OSS 打分规则，再启动服务
 CMD ["sh", "-c", "PYTHONPATH=. python utils/extract_score_rules.py && uvicorn main:app --host 0.0.0.0 --port 8022"]

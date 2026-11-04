@@ -37,25 +37,33 @@ async def init_db():
     await _ensure_columns()
 
 
-_RULE_ITEM_NEW_COLUMNS = (
-    ("remark", "varchar(255) null comment '备注 写入打分提示词作为该项补充判定说明'"),
-)
+_RULE_ITEM_NEW_COLUMNS = {
+    # 列名 -> (期望的列定义, 期望的 data_type)
+    "remark": (
+        "text null comment '备注 写入打分提示词作为该项补充判定说明'",
+        "text",
+    ),
+}
 
 
 async def _ensure_columns():
-    """给已存在的 score_rule_item 补新增列 create_all 不会改动已建好的表"""
+    """给已存在的 score_rule_item 补新增列并纠正列类型 create_all 不会改动已建好的表"""
     if engine.dialect.name != "mysql":
         return
     async with engine.begin() as conn:
-        for column, ddl in _RULE_ITEM_NEW_COLUMNS:
+        for column, (ddl, expected_type) in _RULE_ITEM_NEW_COLUMNS.items():
             existing = await conn.exec_driver_sql(
-                "select column_name from information_schema.columns "
+                "select data_type from information_schema.columns "
                 "where table_schema = database() and table_name = 'score_rule_item' "
                 f"and column_name = '{column}'"
             )
-            if existing.first() is None:
+            row = existing.first()
+            if row is None:
                 await conn.exec_driver_sql(f"alter table score_rule_item add column {column} {ddl}")
                 logger.info("score_rule_item 补列: %s", column)
+            elif str(row[0]).lower() != expected_type:
+                await conn.exec_driver_sql(f"alter table score_rule_item modify column {column} {ddl}")
+                logger.info("score_rule_item 列类型修正: %s -> %s", column, expected_type)
 
 
 async def close_db():
@@ -91,10 +99,20 @@ async def update_task_status(session: AsyncSession, task_id: int, status: int) -
     await session.commit()
 
 
-async def save_audit_result(session: AsyncSession, task_id: int, score: float, result_json: dict) -> int:
-    """保存打分结果到 result 表 返回 result_id"""
+async def save_audit_result(
+    session: AsyncSession,
+    task_id: int,
+    score: float,
+    result_json: dict,
+    status: int | None = None,
+) -> int:
+    """保存打分结果到 result 表 可同时更新任务状态(同一事务 避免结果落库但状态卡在进行中) 返回 result_id"""
     result_obj = VideoAuditTaskResult(task_id=task_id, score=score, result_json=result_json)
     session.add(result_obj)
+    if status is not None:
+        await session.execute(
+            update(VideoAuditTask).where(VideoAuditTask.id == task_id).values(task_status=status)
+        )
     await session.commit()
     await session.refresh(result_obj)
     return result_obj.id

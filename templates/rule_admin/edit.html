@@ -24,7 +24,7 @@
         <td><input name="number" class="num" value="{{ row.number or '' }}" {% if not editable %}disabled{% endif %}></td>
         <td><input name="point" value="{{ row.point or '' }}" {% if not editable %}disabled{% endif %}></td>
         <td><input name="evidence" value="{{ row.evidence or '' }}" {% if not editable %}disabled{% endif %}></td>
-        <td><input name="remark" class="note" value="{{ row.remark or '' }}" placeholder="补充说明 会写进提示词" {% if not editable %}disabled{% endif %}></td>
+        <td><textarea name="remark" class="note" rows="2" placeholder="判定口径 会写进提示词" {% if not editable %}disabled{% endif %}>{{ row.remark or '' }}</textarea></td>
         <td><input name="score" class="score" value="{{ row.score }}" {% if not editable %}disabled{% endif %}></td>
         <td class="op">{% if editable %}<button type="button" class="del" title="删除该行" onclick="this.closest('tr').remove(); renumber(); recalc()">×</button>{% endif %}</td>
       </tr>
@@ -203,7 +203,7 @@
       + '<td><input name="number" class="num"></td>'
       + '<td><input name="point"></td>'
       + '<td><input name="evidence"></td>'
-      + '<td><input name="remark" class="note" placeholder="补充说明 会写进提示词"></td>'
+      + '<td><textarea name="remark" class="note" rows="2" placeholder="判定口径 会写进提示词"></textarea></td>'
       + '<td><input name="score" class="score" value="1"></td>'
       + '<td class="op"><button type="button" class="del" title="删除该行" onclick="this.closest(\'tr\').remove(); renumber(); recalc()">×</button></td>';
     body.appendChild(tr);

@@ -98,7 +98,8 @@
     input:disabled { color: var(--ink-2); -webkit-text-fill-color: var(--ink-2); opacity: 1; }
     input.num, input.score { text-align: center; font-variant-numeric: tabular-nums; }
     input.score { font-weight: 600; }
-    input.note::placeholder { color: #b6bcc7; }
+    input.note::placeholder, textarea.note::placeholder { color: #b6bcc7; }
+    textarea.note { min-height: 46px; line-height: 1.6; resize: vertical; }
     textarea.text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.75; border: 1px solid var(--line); background: #fff; padding: 12px 14px; min-height: 320px; }
     .field { display: flex; align-items: center; gap: 10px; }
     .field > label { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
