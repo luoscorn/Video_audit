@@ -53,7 +53,7 @@ _RULE_NEW_COLUMNS = {
         ),
         "oral_visual_weight": ("varchar(64) null comment '口述视觉权重 例 口述20 视觉80 写入打分提示词'", "varchar"),
         "oral_keywords": ("text null comment '口述关键词 写入打分提示词'", "text"),
-        "image_refs": ("text null comment '操作图片 每行一个 OSS key 或 http 直链 仅管理页展示'", "text"),
+        "image_refs": ("text null comment '操作图片 每行一个 OSS key 或 http 直链 作为规范参考图送模型'", "text"),
     },
 }
 

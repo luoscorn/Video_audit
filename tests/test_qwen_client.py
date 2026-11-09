@@ -7,8 +7,11 @@
 """
 
 import base64
+import io
 import logging
 import unittest
+
+from PIL import Image
 
 from services import qwen_client as q
 from utils.score_rubric import RubricItem
@@ -186,17 +189,28 @@ class ReferenceImageTest(unittest.TestCase):
             image_refs=image_refs,
         )
 
-    def test_only_first_image_per_item(self):
+    def test_all_images_of_item_are_sent(self):
         q._image_data_uri = lambda ref: f"data:uri:{ref}"
         images = q._reference_images([
             self._item("①", "rule-admin/a/1.jpg\nrule-admin/a/2.jpg"),
             self._item("②", "https://cdn.example/2.png"),
             self._item("③"),
         ])
-        self.assertEqual([label for label, _ in images], ["参考图 ①", "参考图 ②"])
-        # 多图只取首张 无图项跳过
-        self.assertEqual(images[0][1], "data:uri:rule-admin/a/1.jpg")
-        self.assertEqual(images[1][1], "data:uri:https://cdn.example/2.png")
+        # 多项全部送模型并带序号 单图项保持简洁标签 无图项跳过
+        self.assertEqual(
+            [label for label, _ in images], ["参考图 ①-1", "参考图 ①-2", "参考图 ②"]
+        )
+        self.assertEqual(images[1][1], "data:uri:rule-admin/a/2.jpg")
+
+    def test_per_item_cap(self):
+        q._image_data_uri = lambda ref: f"data:uri:{ref}"
+        refs = "\n".join(f"k{idx}.jpg" for idx in range(5))
+        images = q._reference_images([self._item("①", refs)])
+        self.assertEqual(len(images), q._MAX_REFERENCE_IMAGES_PER_ITEM)
+        self.assertEqual([label for label, _ in images], ["参考图 ①-1", "参考图 ①-2", "参考图 ①-3"])
+
+    def test_blank_and_duplicate_refs_collapsed(self):
+        self.assertEqual(self._item("①", "a.jpg\na.jpg\n\n b.jpg ").images, ["a.jpg", "b.jpg"])
 
     def test_capped_by_max_images(self):
         q._image_data_uri = lambda ref: f"data:uri:{ref}"
@@ -272,6 +286,66 @@ def _plain_items():
         RubricItem(dimension="基本", number="1", point="选用探针", evidence="", score=0.2),
         RubricItem(dimension="基本", number="2", point="口镜牵拉", evidence="", score=0.3),
     ]
+
+
+class ShrinkImageTest(unittest.TestCase):
+    """参考图压缩: 阈值内原样透传 超长边才缩小 同时修正 EXIF 方向"""
+
+    def _png(self, size, color=(200, 120, 90)) -> bytes:
+        buf = io.BytesIO()
+        Image.new("RGB", size, color).save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_small_image_passes_through_untouched(self):
+        raw = self._png((640, 480))
+        data, mime = q._shrink_image(raw, "image/png")
+        self.assertIs(data, raw)
+        self.assertEqual(mime, "image/png")
+
+    def test_large_image_is_downscaled_to_max_edge(self):
+        raw = self._png((2000, 1500))
+        data, mime = q._shrink_image(raw, "image/png")
+        self.assertEqual(mime, "image/jpeg")
+        self.assertLess(len(data), len(raw))
+        with Image.open(io.BytesIO(data)) as out:
+            self.assertEqual(max(out.size), q._REFERENCE_MAX_EDGE)
+            self.assertEqual(out.size, (1280, 960))
+
+    def test_exif_orientation_is_fixed(self):
+        img = Image.new("RGB", (1600, 1200), (10, 20, 30))
+        exif = img.getexif()
+        exif[0x0112] = 6          # 顺时针旋转 90 度
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", exif=exif)
+        data, _ = q._shrink_image(buf.getvalue(), "image/jpeg")
+        with Image.open(io.BytesIO(data)) as out:
+            self.assertGreater(out.size[1], out.size[0])   # 已转正为竖向
+            self.assertEqual(max(out.size), q._REFERENCE_MAX_EDGE)
+
+    def test_oversized_bytes_are_recompressed_without_resize(self):
+        noise = Image.effect_noise((1000, 1000), 60).convert("RGB")
+        buf = io.BytesIO()
+        noise.save(buf, format="PNG")
+        raw = buf.getvalue()
+        self.assertGreater(len(raw), q._REFERENCE_MAX_BYTES)
+        data, mime = q._shrink_image(raw, "image/png")
+        self.assertEqual(mime, "image/jpeg")
+        self.assertLess(len(data), len(raw))
+        with Image.open(io.BytesIO(data)) as out:
+            self.assertEqual(out.size, (1000, 1000))
+
+    def test_alpha_channel_flattened_to_white(self):
+        buf = io.BytesIO()
+        Image.new("RGBA", (1600, 1600), (255, 0, 0, 0)).save(buf, format="PNG")
+        data, mime = q._shrink_image(buf.getvalue(), "image/png")
+        self.assertEqual(mime, "image/jpeg")
+        with Image.open(io.BytesIO(data)) as out:
+            self.assertEqual(out.mode, "RGB")
+            self.assertGreaterEqual(min(out.getpixel((10, 10))), 250)   # 透明区铺白底
+
+    def test_invalid_bytes_fall_back_to_raw(self):
+        data, mime = q._shrink_image(b"not-an-image", "image/png")
+        self.assertEqual((data, mime), (b"not-an-image", "image/png"))
 
 
 class PlainNumberRubricTest(unittest.TestCase):

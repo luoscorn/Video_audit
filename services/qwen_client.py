@@ -4,6 +4,7 @@
 """千问 VL 视频打分客户端 — 支持整段视频与「切片关键帧 + 语音转写」两种输入"""
 
 import base64
+import io
 import json
 import logging
 import re
@@ -12,6 +13,11 @@ from typing import Optional
 
 import requests
 from openai import OpenAI
+
+try:
+    from PIL import Image, ImageOps
+except ImportError:      # 镜像未重建(缺 Pillow)时退化为不压缩 不阻断打分主流程
+    Image = ImageOps = None
 
 from config import settings
 from services.media_evidence import VideoEvidence, frames_payload
@@ -37,12 +43,20 @@ _MISSING_SCORE_RATIO = 0.6
 _MISSING_ITEM_REASON = "模型未返回该评分项 判定缺失 按证据受限档下限暂记 需人工复核"
 # summary 长度上限 与 _SCORING_POLICY 声明的 60 字保持一致
 _SUMMARY_MAX_CHARS = 60
-# 规范参考图总张数上限 每项只取首图 避免叠加切片关键帧后单请求图片过多
-_MAX_REFERENCE_IMAGES = 8
+# 规范参考图: 单项取几张与整单总张数上限
+# 同一评分点常配多张(不同角度/正误对照) 只取首图会丢掉一半判断依据
+# 总量仍要扣着算: 叠加切片关键帧后单请求图片总数不宜再涨
+_MAX_REFERENCE_IMAGES_PER_ITEM = 3
+_MAX_REFERENCE_IMAGES = 12
 # 参考图下载超时 与 进程内缓存时长(参考图随规则版本固定 改图会换 key)
 _REFERENCE_TIMEOUT = 15.0
 _REFERENCE_CACHE_TTL = 600
 _REFERENCE_CACHE_LIMIT = 200
+# 参考图压缩: 长边上限高于关键帧(1024)以保留规范细节 仅在超长边或超体积时重编码
+# 阈值内的图原样透传 不做任何重编码 避免无谓的细节损失
+_REFERENCE_MAX_EDGE = 1280
+_REFERENCE_MAX_BYTES = 400 * 1024
+_REFERENCE_JPEG_QUALITY = 92
 _reference_cache: dict[str, tuple[float, str]] = {}
 
 
@@ -76,7 +90,9 @@ _SCORING_POLICY = """【评分尺度：按评分表严格判定 该扣必扣 但
    - 口镜牵拉只看镜面是否到位：画面中口镜工作端（镜面）抵住或撑开一侧口角、颊侧黏膜，即认定「口镜牵拉口角」达成，不要求看到软组织明显变形（牙模型口角不易形变），也不要求全程持续。
    - 模型牙/仿真头模是标准考核场景：不得以「不是在患者口腔内」「模型无牙龈、无唾液、无真实口角」为由扣分或降档，只按动作在模型上是否规范完成判定。
    - 持续型姿态按出现过即认定：口镜牵拉口角、无名指支点、执笔式握持这类是维持性姿态，只要若干关键帧中出现过该姿态即认定达成，不要求看到动作全过程；相邻帧之间姿态的短暂变化不构成支点不稳。
-   - 手部持械分工只看两手是否各持不同器械：镜头存在镜像、左右判读有歧义时，只要画面中两手分别持用不同器械（一为口镜、一为探针）即视为分工明确，不得仅因左右手判反或口镜用途未逐帧可见而判该项未执行。
+   - 手部持械分工只看两手是否各持不同器械：口镜的形态特征是长柄加末端镜面圆盘，长度明显长于探针，镜面通常朝下对着口角；只要某只手里握的是这种长柄圆头器械即认定为口镜，不要求镜面反光清晰可见，也不要求该手此刻正在牵拉。镜头存在镜像、左右判读有歧义时，只要两手各持不同器械（一为长柄圆头、一为两端弯曲的细探针）即视为分工明确，不得仅因左右手判反、或口镜用途未逐帧可见而判该项未执行。
+   - 每项只按该项评分点的字面要求判定，不得把其他评分项的要求挪作本项的扣分理由：例如「口镜牵拉口角」这项才要求口镜实际牵拉，而「左手持口镜、右手持探针」这类持械项只要求两手各持对应器械，全程未牵拉也不影响本项给满分。
+   - 同一处缺陷只在它对应的评分点扣一次分，不得跨项重复扣：例如未牵拉口角已在「口镜牵拉口角」项扣分，就不得再以此为由扣「持械分工」项的分；每项 reason 只引用与本项评分点直接相关的证据。
 5. summary 只写总体结论：用一两句话概括整体完成情况与主要失分方向（不超过 60 字），不逐条罗列失分点、不复述各扣分明细（细节放在对应 items 的 reason 里），不使用表扬、鼓励式表述，也不写空泛套话。"""
 
 # 切片输入的证据说明
@@ -87,6 +103,7 @@ _EVIDENCE_NOTE = """【证据说明】本次输入是按时间轴组织的视频
 
 # 规范参考图说明: 图来自评分标准的正确操作示意 只能当规范参照 不能当考生证据
 _REFERENCE_NOTE = """【规范参考图说明】下面先给出若干张来自评分标准的标准操作示意图，用于说明该项要求的规范形态（器械选型、握持方式、位置等），帮助你判断考生做法是否规范。
+同一评分点可能配有多张参考图（不同角度、不同部位、或规范与不规范的对照）：标签写成「参考图 编号-序号」的几张属于同一个评分点，要合起来理解该项的规范要求，不能因为其中一张没体现某项要素就当作没配图。
 参考图不是考生本人的操作证据：不得因为某项配了参考图就推定考生已完成该评分点，也不得把参考图里的画面当作考生画面引用。每一项都必须依据考生视频的关键帧与语音转写判定，参考图只用于比对“规范”与“不规范”的差别。"""
 
 # 要求 AI 返回的 JSON 结构说明
@@ -232,6 +249,52 @@ def _build_system_prompt(
     return "\n".join(parts)
 
 
+def _shrink_image(data: bytes, mime: str) -> tuple[bytes, str]:
+    """规整参考图: 修正 EXIF 方向 超长边或超体积时等比缩小并转高质量 JPEG
+
+    阈值内的图原样返回 不重编码 保证规范细节不被压缩损失
+    """
+    if Image is None:
+        return data, mime
+    try:
+        with Image.open(io.BytesIO(data)) as probe:
+            long_edge = max(probe.size)
+            exif = probe.getexif()
+            rotated = bool(exif and exif.get(0x0112, 1) != 1)
+        # 手机直拍的图常带 EXIF 旋转 不改正会让模型看到躺倒的操作示意
+        if long_edge <= _REFERENCE_MAX_EDGE and not rotated and len(data) <= _REFERENCE_MAX_BYTES:
+            return data, mime
+
+        with Image.open(io.BytesIO(data)) as img:
+            img = ImageOps.exif_transpose(img)
+            if "A" in img.getbands():
+                # JPEG 不支持透明通道 透明区铺白底 避免转档后出现黑块
+                rgba = img.convert("RGBA")
+                canvas = Image.new("RGB", rgba.size, (255, 255, 255))
+                canvas.paste(rgba, mask=rgba.getchannel("A"))
+                img = canvas
+            else:
+                img = img.convert("RGB")
+            # thumbnail 只缩不放 长边压到阈值内
+            img.thumbnail((_REFERENCE_MAX_EDGE, _REFERENCE_MAX_EDGE), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(
+                buf, format="JPEG", quality=_REFERENCE_JPEG_QUALITY, subsampling=1, optimize=True
+            )
+            size = img.size
+        shrunk = buf.getvalue()
+    except Exception:
+        logger.warning("参考图压缩失败 改用原图", exc_info=True)
+        return data, mime
+    # 极端情况下重编码反而更大 仍用原图
+    if len(shrunk) >= len(data):
+        return data, mime
+    logger.info(
+        "参考图已压缩: %dKB -> %dKB %dx%d", len(data) // 1024, len(shrunk) // 1024, size[0], size[1]
+    )
+    return shrunk, "image/jpeg"
+
+
 def _image_data_uri(ref: str) -> str:
     """操作图片转 data URI: OSS key 先预签名再下载 http 直链直接下载 失败返回空串
 
@@ -247,7 +310,8 @@ def _image_data_uri(ref: str) -> str:
         mime = (resp.headers.get("content-type") or "").split(";")[0].strip()
         if not mime.startswith("image/"):
             mime = "image/jpeg"
-        data_uri = f"data:{mime};base64,{base64.b64encode(resp.content).decode()}"
+        data, mime = _shrink_image(resp.content, mime)
+        data_uri = f"data:{mime};base64,{base64.b64encode(data).decode()}"
     except Exception:
         logger.warning("规范参考图获取失败 已跳过: %s", ref, exc_info=True)
         return ""
@@ -258,17 +322,24 @@ def _image_data_uri(ref: str) -> str:
 
 
 def _reference_images(rubric_items: list[RubricItem]) -> list[tuple[str, str]]:
-    """收集各评分项的首张操作图片作为规范参考图 总张数受 _MAX_REFERENCE_IMAGES 约束"""
+    """收集各评分项的规范参考图
+
+    单项最多 _MAX_REFERENCE_IMAGES_PER_ITEM 张 整单受 _MAX_REFERENCE_IMAGES 约束
+    多图项的标签带序号(参考图 3-1/3-2) 让模型知道这几张属于同一评分点
+    """
     images: list[tuple[str, str]] = []
     for item in rubric_items:
         if len(images) >= _MAX_REFERENCE_IMAGES:
             break
-        ref = item.first_image
-        if not ref:
-            continue
-        data_uri = _image_data_uri(ref)
-        if data_uri:
-            images.append((f"参考图 {item.number}", data_uri))
+        refs = item.images[:_MAX_REFERENCE_IMAGES_PER_ITEM]
+        for idx, ref in enumerate(refs, start=1):
+            if len(images) >= _MAX_REFERENCE_IMAGES:
+                break
+            data_uri = _image_data_uri(ref)
+            if not data_uri:
+                continue
+            label = f"参考图 {item.number}" if len(refs) == 1 else f"参考图 {item.number}-{idx}"
+            images.append((label, data_uri))
     return images
 
 

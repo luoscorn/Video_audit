@@ -116,6 +116,16 @@ def _plan_clips(evidence: VideoEvidence, check_items: list[dict]) -> tuple[list[
 
     located.sort(key=lambda pair: _plan_priority(pair[0]))
 
+    # 时刻无法定位的项不能直接丢: 模型判「整项未执行」时 time 必为「无」
+    # 而这类判定恰恰最容易错——画面里有口镜被白手套掩住没认出来 就会判成全程未见
+    # 用片中段兜底复核: 考生主要操作集中在片中 片头多为准备 片尾多为收尾
+    if skipped:
+        fallback = _clip_window(
+            evidence.duration * 0.25, evidence.duration * 0.75, evidence.duration
+        )
+        located.extend((item, fallback) for item in sorted(skipped, key=_plan_priority))
+        skipped = []
+
     plans: list[dict] = []
     filled = 0
     for item, hint in located:

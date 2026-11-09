@@ -43,20 +43,17 @@ class RubricItem:
     remark: str = ""          # 人工备注 会作为补充说明写进打分提示词
     oral_visual_weight: str = ""   # 口述/视觉权重 如 口述20% 视觉80% 写进打分提示词
     oral_keywords: str = ""        # 口述关键词 写进打分提示词
-    image_refs: str = ""           # 操作图片 每行一个 OSS key 或 http 直链 首张作为规范参考图送模型
+    image_refs: str = ""           # 操作图片 每行一个 OSS key 或 http 直链 打分时作为规范参考图送模型
 
     @property
     def label(self) -> str:
         return f"{self.number} {self.point}"
 
     @property
-    def first_image(self) -> str:
-        """首张操作图片 打分时每项只送首图控制总张数"""
-        for line in (self.image_refs or "").splitlines():
-            ref = line.strip()
-            if ref:
-                return ref
-        return ""
+    def images(self) -> list[str]:
+        """全部操作图片 去空行与重复项 保持录入顺序"""
+        refs = [line.strip() for line in (self.image_refs or "").splitlines()]
+        return list(dict.fromkeys(ref for ref in refs if ref))
 
 
 # 解析结果缓存: audit_type -> (写入时间, 评分项)

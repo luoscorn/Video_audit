@@ -46,7 +46,7 @@ create table score_rule_item(
     oral_visual_weight varchar(64) null comment '口述视觉权重 例 口述20 视觉80 写入打分提示词',
     oral_keywords text null comment '口述关键词 写入打分提示词',
     remark text null comment '备注 写入打分提示词作为该项补充判定说明',
-    image_refs text null comment '操作图片 每行一个 OSS key 或 http 直链 仅管理页展示',
+    image_refs text null comment '操作图片 每行一个 OSS key 或 http 直链 作为规范参考图送模型',
     score decimal(6,2) not null comment '分值',
     sort_order int default 0 comment '展示与提示词中的顺序',
     key idx_rule_set_id (rule_set_id)

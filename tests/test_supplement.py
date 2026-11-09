@@ -10,6 +10,7 @@ import logging
 import unittest
 
 from services import supplement as s
+from services.media_evidence import VideoEvidence
 
 
 def setUpModule():
@@ -47,6 +48,36 @@ class PlanPriorityTest(unittest.TestCase):
         small = _item("③", 0.05, 0.1, "证据受限")
         big = _item("②", 0.0, 0.2, "证据受限")
         self.assertLess(s._plan_priority(big), s._plan_priority(small))
+
+
+class PlanClipsFallbackTest(unittest.TestCase):
+    """模型判「整项未执行」时 time 为「无」 这类项也必须进复核 否则永远得不到纠正"""
+
+    def _evidence(self, duration: float = 51.0) -> VideoEvidence:
+        return VideoEvidence(duration=duration, slices=[], has_audio=True)
+
+    def _unlocated(self, number: str = "④") -> dict:
+        return {**_item(number, 0.0, 0.15, "全程未见口镜"), "time": "无"}
+
+    def test_unlocated_item_gets_mid_video_window(self):
+        plans, skipped = s._plan_clips(self._evidence(), [self._unlocated()])
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(skipped, [])
+        # 兜底窗口取片中 必须盖住主要操作时段
+        self.assertLessEqual(plans[0]["start"], 28)
+        self.assertGreaterEqual(plans[0]["end"], 31)
+
+    def test_unlocated_and_located_both_scheduled(self):
+        located = {**_item("⑤", 0.0, 0.2, "支点缺失"), "time": "00:22-00:25"}
+        plans, skipped = s._plan_clips(self._evidence(), [self._unlocated(), located])
+        self.assertEqual(skipped, [])
+        numbers = [item["number"] for plan in plans for item in plan["items"]]
+        self.assertCountEqual(numbers, ["④", "⑤"])
+
+    def test_short_video_window_stays_in_range(self):
+        plans, _ = s._plan_clips(self._evidence(10.0), [self._unlocated()])
+        self.assertGreaterEqual(plans[0]["start"], 0)
+        self.assertLessEqual(plans[0]["end"], 10.0)
 
 
 if __name__ == "__main__":
