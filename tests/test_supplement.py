@@ -110,12 +110,25 @@ class PlanClipsCapacityTest(unittest.TestCase):
 
     def test_unlocated_takes_the_slot_before_located(self):
         # 判「整项未执行」的项判错就是把满分判成 0 名额紧张时必须先给它
-        located = {**_item("⑤", 0.0, 0.2, "支点缺失"), "time": "00:45"}
+        # 用 0.16 而非 0 分: 0 分会触发片尾宽窗口 与兜底窗口重叠后复用同一片段
+        located = {**_item("⑤", 0.16, 0.2, "支点证据受限"), "time": "00:45"}
         self._with_slots(1)
         plans, skipped = s._plan_clips(self._evidence(), [located, self._unlocated()])
         numbers = [item["number"] for plan in plans for item in plan["items"]]
         self.assertEqual(numbers, ["④"])
         self.assertEqual([item["number"] for item in skipped], ["⑤"])
+
+    def test_zero_score_item_requests_full_frames(self):
+        # 判 0 分时模型给的 time 不可靠 支点这类姿态可能到片尾才出现
+        # 窗口只能看十八秒 必须改用全片关键帧才能看到整段
+        item = {**_item("⑤", 0.0, 0.2, "全程未见支点"), "time": "00:22"}
+        plans, _ = s._plan_clips(self._evidence(), [item])
+        self.assertTrue(plans[0]["dense"])
+
+    def test_partial_score_item_keeps_window_frames(self):
+        item = {**_item("⑦", 0.16, 0.2, "证据受限"), "time": "00:22"}
+        plans, _ = s._plan_clips(self._evidence(), [item])
+        self.assertFalse(plans[0]["dense"])
 
 
 if __name__ == "__main__":

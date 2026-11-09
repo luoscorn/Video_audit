@@ -124,9 +124,12 @@ def _plan_clips(evidence: VideoEvidence, check_items: list[dict]) -> tuple[list[
         if hint is None:
             skipped.append(item)
             continue
-        located.append((item, hint))
+        # 判 0 分的项等于模型认为整项没做 它给的 time 往往是随手挑的无关帧
+        # 支点、持械分工这类姿态可能出现在任何时刻 复核时得靠全片关键帧兜底
+        dense = float(item["score"]) <= 0.01
+        located.append((item, _clip_window(hint[0], hint[1], evidence.duration), dense))
 
-    located.sort(key=lambda pair: _plan_priority(pair[0]))
+    located.sort(key=lambda trio: _plan_priority(trio[0]))
 
     # 时刻无法定位的项不能直接丢: 模型判「整项未执行」时 time 必为「无」
     # 而这类判定恰恰最容易错——画面里有口镜被白手套掩住没认出来 就会判成全程未见
@@ -137,17 +140,15 @@ def _plan_clips(evidence: VideoEvidence, check_items: list[dict]) -> tuple[list[
         )
         # 排在定位项之前: 这类判定判错就是把该拿的满分判成 0 代价最大
         # 排在后面会先被定位项占满名额 变成 unlocated 永远得不到纠正
-        located = [(item, fallback) for item in sorted(skipped, key=_plan_priority)] + located
+        located = [(item, fallback, True) for item in sorted(skipped, key=_plan_priority)] + located
         skipped = []
 
     plans: list[dict] = []
     filled = 0
-    for item, hint in located:
+    for item, window, dense in located:
         if filled >= _MAX_ITEMS_PER_CALL:
             skipped.append(item)
             continue
-
-        window = _clip_window(hint[0], hint[1], evidence.duration)
         target = next(
             (
                 plan for plan in plans
@@ -162,6 +163,7 @@ def _plan_clips(evidence: VideoEvidence, check_items: list[dict]) -> tuple[list[
             if finish - begin <= _CLIP_MAX_SECONDS and len(target["items"]) < _MAX_ITEMS_PER_CALL:
                 target["start"], target["end"] = begin, finish
                 target["items"].append(item)
+                target["dense"] = target["dense"] or dense
                 filled += 1
                 continue
 
@@ -179,13 +181,14 @@ def _plan_clips(evidence: VideoEvidence, check_items: list[dict]) -> tuple[list[
             reused["start"] = min(reused["start"], window[0])
             reused["end"] = max(reused["end"], window[1])
             reused["items"].append(item)
+            reused["dense"] = reused["dense"] or dense
             filled += 1
             continue
 
         if len(plans) >= settings.MEDIA_SUPPLEMENT_CLIPS:
             skipped.append(item)
             continue
-        plans.append({"start": window[0], "end": window[1], "items": [item]})
+        plans.append({"start": window[0], "end": window[1], "items": [item], "dense": dense})
         filled += 1
 
     return plans, skipped
@@ -325,26 +328,37 @@ def supplement_rescore(
                 continue
             uploaded.append(oss_key)
             # 静态帧比视频片段更容易看清器械细节 模型自己从视频里采样不可控
-            frames = evidence.frames_between(
-                plan["start"], plan["end"], _SUPPLEMENT_FRAME_LIMIT
-            )
+            if plan.get("dense"):
+                # 判 0 分的项模型自己也不知道动作在哪 给全片关键帧 不能只看窗口内那六张
+                frames = [frame for slice_ in evidence.slices for frame in slice_.frames]
+            else:
+                frames = evidence.frames_between(
+                    plan["start"], plan["end"], _SUPPLEMENT_FRAME_LIMIT
+                )
             clips.append({
                 "label": f" {_fmt(plan['start'])}-{_fmt(plan['end'])}",
                 "url": clip_url,
                 "transcript": _transcript_text(evidence, plan["start"], plan["end"]),
                 "frames": [(frame.label, frame.data) for frame in frames],
                 "items": plan["items"],
+                "dense": bool(plan.get("dense")),
             })
 
         if not clips:
             logger.warning("二次补证: 无可用片段，跳过复核")
             return None
 
-        updates = rescore_with_clips(
-            audit_type,
-            [item for clip in clips for item in clip["items"]],
-            clips,
-        )
+        updates: list[dict] = []
+        for clip in clips:
+            if clip.get("dense"):
+                # 判 0 分的项逐个单问: 多项同批判定时模型对单项只扫一眼
+                # 实测同一帧单问能认出支点 混在几项里就写成「未见支点」
+                for item in clip["items"]:
+                    updates.extend(
+                        rescore_with_clips(audit_type, [item], [clip], blind=True)
+                    )
+            else:
+                updates.extend(rescore_with_clips(audit_type, clip["items"], [clip]))
         if not updates:
             logger.warning("二次补证: 模型未返回有效复核结果")
             return None
