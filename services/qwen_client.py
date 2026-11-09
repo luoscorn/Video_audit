@@ -442,8 +442,11 @@ def _assemble_result(
 
     :return: (结果 dict, 缺失的评分项编号列表)；缺项不再抛错 由调用方补问或兜底
     """
-    rubric_by_number = {item.number: item for item in rubric_items}
-    order = {item.number: idx for idx, item in enumerate(rubric_items)}
+    # 编号不能只归一化模型侧: 规则里常写成 1/2/3 而模型可能返回 ①/(1)
+    # 只归一侧会让全部评分项被判为未知编号丢弃(实测规则编号为 1~9 时 items 全空)
+    key_of = _normalize_number
+    rubric_by_number = {key_of(item.number): item for item in rubric_items}
+    order = {key_of(item.number): idx for idx, item in enumerate(rubric_items)}
     seen: set[str] = set()
     item_results = []
     deductions = []
@@ -452,7 +455,7 @@ def _assemble_result(
         if not isinstance(raw_item, dict):
             logger.warning("忽略格式错误的评分项: %r", raw_item)
             continue
-        number = _normalize_number(raw_item.get("number", ""))
+        number = key_of(raw_item.get("number", ""))
         if number not in rubric_by_number:
             logger.warning("忽略未知评分项编号: %r", raw_item.get("number"))
             continue
@@ -474,7 +477,7 @@ def _assemble_result(
         reason = _clean_reason(str(raw_item.get("reason", "")).strip())
 
         item_results.append({
-            "number": number,
+            "number": rubric.number,        # 统一回规则里的原始编号 与前端、二次补证保持一致
             "dimension": rubric.dimension,
             "point": rubric.point,
             "full_score": rubric.score,
@@ -490,8 +493,8 @@ def _assemble_result(
                 "reason": reason or "未说明扣分原因",
             })
 
-    missing = [item.number for item in rubric_items if item.number not in seen]
-    item_results.sort(key=lambda entry: order[entry["number"]])
+    missing = [item.number for item in rubric_items if key_of(item.number) not in seen]
+    item_results.sort(key=lambda entry: order[key_of(entry["number"])])
     total_score = round(sum(entry["score"] for entry in item_results), 2)
 
     return {
@@ -672,12 +675,12 @@ def _parse_supplement(raw_text: str, check_items: list[dict]) -> list[dict]:
     if not isinstance(raw_items, list):
         raise ValueError("二次复核返回缺少 items 数组")
 
-    pending = {item["number"]: item for item in check_items}
+    pending = {_normalize_number(item["number"]): item for item in check_items}
     results = []
     for raw in raw_items:
         if not isinstance(raw, dict):
             continue
-        number = str(raw.get("number", "")).strip()
+        number = _normalize_number(raw.get("number", ""))
         item = pending.pop(number, None)
         if item is None:
             continue
@@ -686,7 +689,7 @@ def _parse_supplement(raw_text: str, check_items: list[dict]) -> list[dict]:
         except (TypeError, ValueError):
             continue
         results.append({
-            "number": number,
+            "number": item["number"],      # 回填规则原始编号 供 _apply_updates 对上结果项
             "clear": _as_bool(raw.get("clear")),
             "score": round(max(0.0, min(float(item["full_score"]), score)), 2),
             "reason": _clean_reason(str(raw.get("reason", "")).strip()),

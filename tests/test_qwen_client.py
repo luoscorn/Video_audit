@@ -266,6 +266,58 @@ class ReferenceImageTest(unittest.TestCase):
         self.assertEqual([entry["type"] for entry in content], ["video_url", "text"])
 
 
+def _plain_items():
+    """规则编号写成阿拉伯数字的情形 管理页录入的规则普遍是这种"""
+    return [
+        RubricItem(dimension="基本", number="1", point="选用探针", evidence="", score=0.2),
+        RubricItem(dimension="基本", number="2", point="口镜牵拉", evidence="", score=0.3),
+    ]
+
+
+class PlainNumberRubricTest(unittest.TestCase):
+    """规则编号为 1/2/3 时 模型返回 1 或 ① 都必须能对上 否则所有评分项被当成未知编号丢弃"""
+
+    def setUp(self):
+        self._original_call_model = q._call_model
+
+    def tearDown(self):
+        q._call_model = self._original_call_model
+
+    def test_matches_arabic_model_number(self):
+        result, missing = q._assemble_result(
+            [{"number": "1", "score": 0.2}, {"number": "2", "score": 0.1}], "", _plain_items()
+        )
+        self.assertEqual(missing, [])
+        self.assertEqual([i["number"] for i in result["items"]], ["1", "2"])
+        self.assertEqual(result["total_score"], 0.3)
+
+    def test_matches_circled_model_number(self):
+        result, missing = q._assemble_result(
+            [{"number": "①", "score": 0.2}, {"number": "（2）", "score": 0.3}], "", _plain_items()
+        )
+        self.assertEqual(missing, [])
+        self.assertEqual([i["number"] for i in result["items"]], ["1", "2"])
+        self.assertEqual(result["total_score"], 0.5)
+
+    def test_fallback_applies_when_rule_numbers_are_arabic(self):
+        q._call_model = lambda *a, **kw: '{"items":[]}'
+        result = q._finalize_rubric_result(
+            '{"items":[]}', _plain_items(), "测试项目", "http://example/video.mp4", None
+        )
+        self.assertEqual(len(result["items"]), 2)
+        self.assertTrue(all(i["fallback"] for i in result["items"]))
+        self.assertEqual([i["number"] for i in result["items"]], ["1", "2"])
+        self.assertEqual(result["total_score"], round((0.2 + 0.3) * q._MISSING_SCORE_RATIO, 2))
+
+    def test_supplement_accepts_circled_number(self):
+        raw = '{"items":[{"number":"①","clear":true,"score":0.2,"reason":"片段中可见"}]}'
+        out = q._parse_supplement(
+            raw, [{"number": "1", "point": "选用探针", "full_score": 0.2, "score": 0.1}]
+        )
+        self.assertEqual([i["number"] for i in out], ["1"])
+        self.assertTrue(out[0]["clear"])
+
+
 class PromptPolicyTest(unittest.TestCase):
     def test_gradient_single_source_of_truth(self):
         # 档位百分比只允许出现在 _SCORING_POLICY 若其它片段复制档位 改档时必然漏改
