@@ -326,19 +326,30 @@ def _reference_images(rubric_items: list[RubricItem]) -> list[tuple[str, str]]:
 
     单项最多 _MAX_REFERENCE_IMAGES_PER_ITEM 张 整单受 _MAX_REFERENCE_IMAGES 约束
     多图项的标签带序号(参考图 3-1/3-2) 让模型知道这几张属于同一评分点
+
+    按轮次分配: 先给每项首图 再逐项补第二张 第三张。若按项顺序先到先得
+    前面的项会把整单名额占满 后面的项一张参考图都拿不到 且悄无声息
     """
+    plans = [
+        (item, item.images[:_MAX_REFERENCE_IMAGES_PER_ITEM]) for item in rubric_items
+    ]
     images: list[tuple[str, str]] = []
-    for item in rubric_items:
+    for round_idx in range(_MAX_REFERENCE_IMAGES_PER_ITEM):
         if len(images) >= _MAX_REFERENCE_IMAGES:
             break
-        refs = item.images[:_MAX_REFERENCE_IMAGES_PER_ITEM]
-        for idx, ref in enumerate(refs, start=1):
+        for item, refs in plans:
             if len(images) >= _MAX_REFERENCE_IMAGES:
                 break
-            data_uri = _image_data_uri(ref)
+            if round_idx >= len(refs):
+                continue
+            data_uri = _image_data_uri(refs[round_idx])
             if not data_uri:
                 continue
-            label = f"参考图 {item.number}" if len(refs) == 1 else f"参考图 {item.number}-{idx}"
+            label = (
+                f"参考图 {item.number}"
+                if len(refs) == 1
+                else f"参考图 {item.number}-{round_idx + 1}"
+            )
             images.append((label, data_uri))
     return images
 

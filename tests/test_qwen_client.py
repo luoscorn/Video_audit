@@ -173,7 +173,7 @@ class FinalizeResultTest(unittest.TestCase):
 
 
 class ReferenceImageTest(unittest.TestCase):
-    """规范参考图: 每项首图 总张数受限 下载失败跳过"""
+    """规范参考图: 轮次分配 单项与整单双重上限 下载失败跳过"""
 
     def setUp(self):
         self._original_data_uri = q._image_data_uri
@@ -196,11 +196,11 @@ class ReferenceImageTest(unittest.TestCase):
             self._item("②", "https://cdn.example/2.png"),
             self._item("③"),
         ])
-        # 多项全部送模型并带序号 单图项保持简洁标签 无图项跳过
+        # 轮次分配: 先每项首图 再向后补第二张 单图项保持简洁标签 无图项跳过
         self.assertEqual(
-            [label for label, _ in images], ["参考图 ①-1", "参考图 ①-2", "参考图 ②"]
+            [label for label, _ in images], ["参考图 ①-1", "参考图 ②", "参考图 ①-2"]
         )
-        self.assertEqual(images[1][1], "data:uri:rule-admin/a/2.jpg")
+        self.assertEqual(images[2][1], "data:uri:rule-admin/a/2.jpg")
 
     def test_per_item_cap(self):
         q._image_data_uri = lambda ref: f"data:uri:{ref}"
@@ -216,6 +216,23 @@ class ReferenceImageTest(unittest.TestCase):
         q._image_data_uri = lambda ref: f"data:uri:{ref}"
         items = [self._item(str(idx), f"k{idx}.jpg") for idx in range(20)]
         self.assertEqual(len(q._reference_images(items)), q._MAX_REFERENCE_IMAGES)
+
+    def test_late_item_not_starved_when_capped(self):
+        # 6 项各 3 张共 18 张 超整单上限: 轮次分配下每项拿到的张数一致
+        # 按项顺序先到先得会让前面几项占满名额 后面的项一张参考图都没有
+        q._image_data_uri = lambda ref: f"data:uri:{ref}"
+        items = [
+            self._item(str(n), "\n".join(f"k{n}-{idx}.jpg" for idx in range(3)))
+            for n in range(1, 7)
+        ]
+        images = q._reference_images(items)
+        self.assertEqual(len(images), q._MAX_REFERENCE_IMAGES)
+        labels = [label for label, _ in images]
+        per_item = q._MAX_REFERENCE_IMAGES // 6
+        for n in range(1, 7):
+            self.assertEqual(
+                sum(1 for label in labels if label.startswith(f"参考图 {n}-")), per_item
+            )
 
     def test_download_failure_skips_image(self):
         q._image_data_uri = lambda ref: ""

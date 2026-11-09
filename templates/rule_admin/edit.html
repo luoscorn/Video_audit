@@ -61,7 +61,7 @@
         <th>分值</th>
         <th>口述视觉权重</th>
         <th>口述关键词</th>
-        <th>操作图片<span class="col-tip">首张作为规范参考图送模型</span></th>
+        <th>操作图片<span class="col-tip">每项最多 3 张 全部作为规范参考图送模型</span></th>
         <th></th>
       </tr>
     </thead>
@@ -96,7 +96,7 @@
           <textarea name="image_refs" class="img-refs" hidden>{{ row.image_refs or '' }}</textarea>
           {% if editable %}
             <button type="button" class="img-add" onclick="pickImage(this)">＋ 图片</button>
-            <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden onchange="uploadImage(this)">
+            <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple hidden onchange="uploadImage(this)">
           {% endif %}
         </td>
         <td class="op">{% if editable %}<button type="button" class="del" title="删除该行" onclick="this.closest('tr').remove(); recalc()">×</button>{% endif %}</td>
@@ -212,7 +212,7 @@
     {% endif %}
     <button type="button" id="preview-btn" onclick="togglePreview(this)">预览提示词</button>
     {% if kind == 'rubric' %}
-      <span class="hint">口述权重、口述关键词与备注都会写进打分提示词；操作图片首张作为规范参考图随规则送模型</span>
+      <span class="hint">口述权重、口述关键词与备注都会写进打分提示词；操作图片作为规范参考图随规则送模型，每项最多 3 张</span>
     {% endif %}
   </div>
   <div class="group end">
@@ -380,7 +380,7 @@
       + '<td><textarea name="oral_keywords" class="note cell-text" rows="2" placeholder="口述应说到的关键词"></textarea></td>'
       + '<td class="img-cell"><div class="thumbs"></div><textarea name="image_refs" class="img-refs" hidden></textarea>'
       + '<button type="button" class="img-add" onclick="pickImage(this)">＋ 图片</button>'
-      + '<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden onchange="uploadImage(this)"></td>'
+      + '<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple hidden onchange="uploadImage(this)"></td>'
       + '<td class="op"><button type="button" class="del" title="删除该行" onclick="this.closest(\'tr\').remove(); recalc()">×</button></td>';
     body.appendChild(tr);
     recalc();
@@ -437,6 +437,13 @@
   }
 
   // ===== 操作图片: 上传到 OSS 后把引用写回 hidden textarea =====
+  // 与后端 _MAX_REFERENCE_IMAGES_PER_ITEM 一致 超出不送模型
+  var MAX_IMAGES_PER_ITEM = 3;
+
+  function thumbCount(tr) {
+    return tr ? tr.querySelectorAll('.thumbs .thumb').length : 0;
+  }
+
   function syncRefs(tr) {
     var box = tr.querySelector('textarea.img-refs');
     if (!box) return;
@@ -478,28 +485,50 @@
   }
 
   function pickImage(btn) {
+    var tr = btn.closest('tr');
+    if (tr && thumbCount(tr) >= MAX_IMAGES_PER_ITEM) {
+      alert('每项最多 ' + MAX_IMAGES_PER_ITEM + ' 张操作图片，先删掉不用的再上传');
+      return;
+    }
     var input = btn.parentNode.querySelector('input[type="file"]');
     if (input) input.click();
   }
 
   function uploadImage(input) {
-    var file = input.files && input.files[0];
-    if (!file) return;
+    var files = Array.prototype.slice.call(input.files || []);
+    if (!files.length) return;
     var tr = input.closest('tr');
-    var btn = tr ? tr.querySelector('.img-add') : null;
+    if (!tr) return;
+    // 与后端 _MAX_REFERENCE_IMAGES_PER_ITEM 保持一致 超出部分不送模型 提前告知
+    var room = MAX_IMAGES_PER_ITEM - thumbCount(tr);
+    if (room <= 0) {
+      alert('每项最多 ' + MAX_IMAGES_PER_ITEM + ' 张操作图片，先删掉不用的再上传');
+      input.value = '';
+      return;
+    }
+    var queue = files.slice(0, room);
+    if (files.length > room) {
+      alert('每项最多 ' + MAX_IMAGES_PER_ITEM + ' 张，本次只上传前 ' + room + ' 张');
+    }
+    var btn = tr.querySelector('.img-add');
     var label = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = '上传中…'; }
 
-    var body = new FormData();
-    body.append('file', file);
-    fetch(location.pathname.replace(/\/$/, '') + '/upload-image', {
-      method: 'POST', body: body, credentials: 'same-origin'
-    }).then(function (resp) {
-      return resp.json().catch(function () { return {}; }).then(function (data) {
-        if (!resp.ok) throw new Error(data.detail || ('上传失败 ' + resp.status));
-        addThumb(tr, data.key, data.url);
+    // 串行上传 保证缩略图顺序与选择顺序一致
+    queue.reduce(function (chain, file) {
+      return chain.then(function () {
+        var body = new FormData();
+        body.append('file', file);
+        return fetch(location.pathname.replace(/\/$/, '') + '/upload-image', {
+          method: 'POST', body: body, credentials: 'same-origin'
+        }).then(function (resp) {
+          return resp.json().catch(function () { return {}; }).then(function (data) {
+            if (!resp.ok) throw new Error(data.detail || ('上传失败 ' + resp.status));
+            addThumb(tr, data.key, data.url);
+          });
+        });
       });
-    }).catch(function (err) {
+    }, Promise.resolve()).catch(function (err) {
       alert(err.message || '图片上传失败');
     }).finally(function () {
       input.value = '';
