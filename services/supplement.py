@@ -35,6 +35,7 @@ _CLIP_AFTER = 6.0            # 证据时刻后预留秒数
 _CLIP_MIN_SECONDS = 6.0
 _CLIP_MAX_SECONDS = 15.0
 _MERGE_GAP_SECONDS = 2.0     # 相邻片段窗口间隔小于该值时合并为一个片段
+_REUSE_OVERLAP_RATIO = 0.6   # 窗口与已有片段重叠度超过该比例时复用同一片段
 _SUPPLEMENT_FRAME_LIMIT = 6  # 每个片段附带的静态关键帧张数 细节判定以这些帧为准
 
 _TIME_RANGE_RE = re.compile(r"(\d{1,3}):(\d{2})(?:\s*[-~至到]\s*(\d{1,3}):(\d{2}))?")
@@ -100,6 +101,16 @@ def _plan_priority(item: dict) -> tuple[int, float]:
     return (1 if dirty else 0, float(item["score"]) - float(item["full_score"]))
 
 
+def _overlap_ratio(window: tuple[float, float], plan: dict) -> float:
+    """窗口与已有片段的重叠比例 以较短者为分母"""
+    start = max(window[0], plan["start"])
+    end = min(window[1], plan["end"])
+    if end <= start:
+        return 0.0
+    shorter = min(window[1] - window[0], plan["end"] - plan["start"])
+    return (end - start) / shorter if shorter > 0 else 0.0
+
+
 def _plan_clips(evidence: VideoEvidence, check_items: list[dict]) -> tuple[list[dict], list[dict]]:
     """
     把待复核项分配到片段窗口 扣分多的项优先占用有限的片段名额
@@ -124,7 +135,9 @@ def _plan_clips(evidence: VideoEvidence, check_items: list[dict]) -> tuple[list[
         fallback = _clip_window(
             evidence.duration * 0.25, evidence.duration * 0.75, evidence.duration
         )
-        located.extend((item, fallback) for item in sorted(skipped, key=_plan_priority))
+        # 排在定位项之前: 这类判定判错就是把该拿的满分判成 0 代价最大
+        # 排在后面会先被定位项占满名额 变成 unlocated 永远得不到纠正
+        located = [(item, fallback) for item in sorted(skipped, key=_plan_priority)] + located
         skipped = []
 
     plans: list[dict] = []
@@ -151,6 +164,23 @@ def _plan_clips(evidence: VideoEvidence, check_items: list[dict]) -> tuple[list[
                 target["items"].append(item)
                 filled += 1
                 continue
+
+        # 窗口与已有片段高度重合时复用它: 为了 15 秒上限另起一段几乎相同的视频
+        # 会白白吃掉片段名额 后面的项只能变成 unlocated 永远不被复核
+        reused = next(
+            (
+                plan for plan in plans
+                if len(plan["items"]) < _MAX_ITEMS_PER_CALL
+                and _overlap_ratio(window, plan) >= _REUSE_OVERLAP_RATIO
+            ),
+            None,
+        )
+        if reused is not None:
+            reused["start"] = min(reused["start"], window[0])
+            reused["end"] = max(reused["end"], window[1])
+            reused["items"].append(item)
+            filled += 1
+            continue
 
         if len(plans) >= settings.MEDIA_SUPPLEMENT_CLIPS:
             skipped.append(item)

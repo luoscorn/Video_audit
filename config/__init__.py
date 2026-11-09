@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     MEDIA_FRAME_WIDTH: int = 1024
     # 二次补证: 仅对证据受限的评分项切连续片段重判 关闭后只用一轮关键帧
     MEDIA_SUPPLEMENT_ENABLED: bool = True
-    MEDIA_SUPPLEMENT_CLIPS: int = 3
+    MEDIA_SUPPLEMENT_CLIPS: int = 6
     # 外部 ffmpeg 可执行文件路径 为空时依次尝试 PATH 与 imageio-ffmpeg 内置二进制
     FFMPEG_BINARY: Optional[str] = None
     # 规则管理页口令 为空则管理页禁用(用户名固定 admin)

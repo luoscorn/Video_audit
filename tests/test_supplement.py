@@ -80,5 +80,43 @@ class PlanClipsFallbackTest(unittest.TestCase):
         self.assertLessEqual(plans[0]["end"], 10.0)
 
 
+class PlanClipsCapacityTest(unittest.TestCase):
+    """片段名额有限: 重合窗口要复用 未定位项要先占名额"""
+
+    def _evidence(self, duration: float = 51.0) -> VideoEvidence:
+        return VideoEvidence(duration=duration, slices=[], has_audio=True)
+
+    def _unlocated(self, number: str = "④") -> dict:
+        return {**_item(number, 0.0, 0.15, "全程未见口镜"), "time": "无"}
+
+    def _with_slots(self, slots: int):
+        original = s.settings.MEDIA_SUPPLEMENT_CLIPS
+        s.settings.MEDIA_SUPPLEMENT_CLIPS = slots
+        self.addCleanup(setattr, s.settings, "MEDIA_SUPPLEMENT_CLIPS", original)
+
+    def test_overlapping_windows_share_one_clip(self):
+        # 三个项的证据时刻挤在 20~23 秒: 为 15 秒上限切出三段几乎一样的视频
+        # 会白白吃掉名额 让后面的项无处复核
+        items = [
+            {**_item("②", 0.0, 0.2, "未见牵拉"), "time": "00:20"},
+            {**_item("⑤", 0.16, 0.2, "证据受限"), "time": "00:22"},
+            {**_item("⑦", 0.16, 0.2, "证据受限"), "time": "00:23"},
+        ]
+        self._with_slots(1)
+        plans, skipped = s._plan_clips(self._evidence(), items)
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(skipped, [])
+        self.assertEqual(len(plans[0]["items"]), 3)
+
+    def test_unlocated_takes_the_slot_before_located(self):
+        # 判「整项未执行」的项判错就是把满分判成 0 名额紧张时必须先给它
+        located = {**_item("⑤", 0.0, 0.2, "支点缺失"), "time": "00:45"}
+        self._with_slots(1)
+        plans, skipped = s._plan_clips(self._evidence(), [located, self._unlocated()])
+        numbers = [item["number"] for plan in plans for item in plan["items"]]
+        self.assertEqual(numbers, ["④"])
+        self.assertEqual([item["number"] for item in skipped], ["⑤"])
+
+
 if __name__ == "__main__":
     unittest.main()
