@@ -124,6 +124,25 @@ class VideoEvidence:
         shutil.rmtree(os.path.dirname(self.video_path), ignore_errors=True)
         self.video_path = ""
 
+    def frames_between(self, start: float, end: float, limit: int = 6) -> list["Frame"]:
+        """取时间窗口内的关键帧 超过 limit 张时等距抽样
+
+        二次补证要靠这些帧看清器械形态、持械分工、镜面朝向等细节
+        视频交给模型后由它自己采样 分辨率与采样点都不可控 远不如直接给原图
+        """
+        picked = [
+            frame
+            for slice_ in self.slices
+            for frame in slice_.frames
+            if start <= frame.seconds <= end
+        ]
+        if limit <= 0 or len(picked) <= limit:
+            return picked
+        if limit == 1:
+            return [picked[len(picked) // 2]]
+        step = (len(picked) - 1) / (limit - 1)
+        return [picked[round(index * step)] for index in range(limit)]
+
     def describe(self) -> str:
         """一行日志描述"""
         return (

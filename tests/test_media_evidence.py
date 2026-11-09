@@ -8,7 +8,7 @@
 
 import unittest
 
-from services.media_evidence import _gap_fill_index, _select_timestamps
+from services.media_evidence import Frame, VideoEvidence, VideoSlice, _gap_fill_index, _select_timestamps
 
 
 def _candidates(spec: list[tuple[float, int]]) -> list[tuple[float, bytes]]:
@@ -20,6 +20,37 @@ def _uniform(duration: float, step: float, value: int = 200) -> list[tuple[float
     """等间隔同画面的候选帧"""
     count = int(duration / step) + 1
     return [(round(i * step, 3), value) for i in range(count)]
+
+
+class FramesBetweenTest(unittest.TestCase):
+    """二次补证取窗口内关键帧: 超出张数时等距抽样 静态帧供模型看清器械细节"""
+
+    def _evidence(self) -> VideoEvidence:
+        frames = [Frame(seconds=float(t), data=f"d{t}") for t in (0, 5, 10, 15, 20, 25, 30)]
+        return VideoEvidence(
+            duration=31.0,
+            slices=[VideoSlice(index=1, start=0.0, end=31.0, frames=frames)],
+            has_audio=True,
+        )
+
+    def test_keeps_only_frames_inside_window(self):
+        self.assertEqual(
+            [frame.seconds for frame in self._evidence().frames_between(8, 22, 6)],
+            [10.0, 15.0, 20.0],
+        )
+
+    def test_uniform_sampling_when_over_limit(self):
+        # 7 张取 4 张: 首尾必保留 中间等距
+        self.assertEqual(
+            [frame.seconds for frame in self._evidence().frames_between(0, 30, 4)],
+            [0.0, 10.0, 20.0, 30.0],
+        )
+
+    def test_limit_one_takes_the_middle_frame(self):
+        self.assertEqual([frame.seconds for frame in self._evidence().frames_between(0, 30, 1)], [15.0])
+
+    def test_empty_window_returns_nothing(self):
+        self.assertEqual(self._evidence().frames_between(40, 50, 6), [])
 
 
 class GapFillIndexTest(unittest.TestCase):

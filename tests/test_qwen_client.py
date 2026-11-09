@@ -305,6 +305,51 @@ def _plain_items():
     ]
 
 
+class SupplementFrameTest(unittest.TestCase):
+    """二次复核把片段静态帧一并送模型 器械细节以静态帧为准"""
+
+    def setUp(self):
+        self._original_call_model = q._call_model
+
+    def tearDown(self):
+        q._call_model = self._original_call_model
+
+    def _run(self, clip: dict) -> list[dict]:
+        captured = {}
+
+        def fake_call(system_prompt, content, audit_type):
+            captured["content"] = content
+            return '{"items":[]}'
+
+        q._call_model = fake_call
+        q.rescore_with_clips(
+            "探诊检查",
+            [{"number": "4", "point": "左手持口镜", "full_score": 0.15, "score": 0.0}],
+            [clip],
+        )
+        return captured["content"]
+
+    def test_clip_frames_are_sent_as_images(self):
+        content = self._run({
+            "label": " 00:17-00:30", "url": "http://example/clip.mp4",
+            "transcript": "", "frames": [("00:27", "B64"), ("00:28", "B64B")],
+        })
+        images = [part for part in content if part["type"] == "image_url"]
+        self.assertEqual(len(images), 2)
+        self.assertEqual(images[0]["image_url"]["url"], "data:image/jpeg;base64,B64")
+        labels = [part.get("text") for part in content if part["type"] == "text"]
+        self.assertIn("关键帧 @00:27：", labels)
+        self.assertTrue(any("以这些静态帧为准" in (text or "") for text in labels))
+
+    def test_clip_without_frames_keeps_video_only(self):
+        content = self._run({
+            "label": " 00:17-00:30", "url": "http://example/clip.mp4", "transcript": "",
+        })
+        kinds = [part["type"] for part in content]
+        self.assertIn("video_url", kinds)
+        self.assertNotIn("image_url", kinds)
+
+
 class ShrinkImageTest(unittest.TestCase):
     """参考图压缩: 阈值内原样透传 超长边才缩小 同时修正 EXIF 方向"""
 

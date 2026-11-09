@@ -35,6 +35,7 @@ _CLIP_AFTER = 6.0            # 证据时刻后预留秒数
 _CLIP_MIN_SECONDS = 6.0
 _CLIP_MAX_SECONDS = 15.0
 _MERGE_GAP_SECONDS = 2.0     # 相邻片段窗口间隔小于该值时合并为一个片段
+_SUPPLEMENT_FRAME_LIMIT = 6  # 每个片段附带的静态关键帧张数 细节判定以这些帧为准
 
 _TIME_RANGE_RE = re.compile(r"(\d{1,3}):(\d{2})(?:\s*[-~至到]\s*(\d{1,3}):(\d{2}))?")
 _CN_SECONDS_RE = re.compile(r"(?:(\d{1,3})\s*分[钟]?\s*)?(\d+(?:\.\d+)?)\s*秒")
@@ -293,10 +294,15 @@ def supplement_rescore(
                 logger.warning("补证片段上传失败: %s", exc)
                 continue
             uploaded.append(oss_key)
+            # 静态帧比视频片段更容易看清器械细节 模型自己从视频里采样不可控
+            frames = evidence.frames_between(
+                plan["start"], plan["end"], _SUPPLEMENT_FRAME_LIMIT
+            )
             clips.append({
                 "label": f" {_fmt(plan['start'])}-{_fmt(plan['end'])}",
                 "url": clip_url,
                 "transcript": _transcript_text(evidence, plan["start"], plan["end"]),
+                "frames": [(frame.label, frame.data) for frame in frames],
                 "items": plan["items"],
             })
 
