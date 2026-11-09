@@ -194,6 +194,18 @@ def _plan_clips(evidence: VideoEvidence, check_items: list[dict]) -> tuple[list[
     return plans, skipped
 
 
+def _merge_frames(base: list, extra: list, gap: float = 0.5) -> list:
+    """合并两批帧 时刻相近的只保留先出现那张 结果按时间升序"""
+    merged = list(base)
+    kept = [frame.seconds for frame in base]
+    for frame in extra:
+        if any(abs(frame.seconds - seconds) < gap for seconds in kept):
+            continue
+        kept.append(frame.seconds)
+        merged.append(frame)
+    return sorted(merged, key=lambda frame: frame.seconds)
+
+
 def _transcript_text(evidence: VideoEvidence, start: float, end: float) -> str:
     """取片段窗口范围内的语音转写 无重叠切片时返回空串"""
     parts = [
@@ -328,18 +340,28 @@ def supplement_rescore(
                 continue
             uploaded.append(oss_key)
             # 静态帧比视频片段更容易看清器械细节 模型自己从视频里采样不可控
+            # 首轮关键帧是「全片挑变化最大」的结果 平均两秒一张
+            # 某段动作往往只分到一两张 换端、探入间隙这类瞬时动作恰好落在两帧之间
+            # 所以复核时按窗口重新抽帧 密度只由窗口长度与帧上限决定
+            limit = settings.MEDIA_SUPPLEMENT_FRAMES or _SUPPLEMENT_FRAME_LIMIT
+            framed = evidence.extract_frames_at(
+                plan["start"], plan["end"], limit,
+                edge=settings.MEDIA_SUPPLEMENT_FRAME_WIDTH,
+            )
             if plan.get("dense"):
-                # 判 0 分的项模型自己也不知道动作在哪 给全片关键帧 不能只看窗口内那六张
-                frames = [frame for slice_ in evidence.slices for frame in slice_.frames]
+                # 判 0 分的项模型给的时刻本身不可信 全片关键帧打底 窗口密帧补细节
+                whole = _merge_frames(
+                    [frame for slice_ in evidence.slices for frame in slice_.frames], framed
+                )
             else:
-                frames = evidence.frames_between(
+                whole = framed or evidence.frames_between(
                     plan["start"], plan["end"], _SUPPLEMENT_FRAME_LIMIT
                 )
             clips.append({
                 "label": f" {_fmt(plan['start'])}-{_fmt(plan['end'])}",
                 "url": clip_url,
                 "transcript": _transcript_text(evidence, plan["start"], plan["end"]),
-                "frames": [(frame.label, frame.data) for frame in frames],
+                "frames": [(frame.label, frame.data) for frame in whole],
                 "items": plan["items"],
                 "dense": bool(plan.get("dense")),
             })

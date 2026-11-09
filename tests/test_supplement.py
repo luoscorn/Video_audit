@@ -9,8 +9,9 @@
 import logging
 import unittest
 
+from services import media_evidence as m
 from services import supplement as s
-from services.media_evidence import VideoEvidence
+from services.media_evidence import Frame, VideoEvidence
 
 
 def setUpModule():
@@ -129,6 +130,45 @@ class PlanClipsCapacityTest(unittest.TestCase):
         item = {**_item("⑦", 0.16, 0.2, "证据受限"), "time": "00:22"}
         plans, _ = s._plan_clips(self._evidence(), [item])
         self.assertFalse(plans[0]["dense"])
+
+
+class FrameTimestampsTest(unittest.TestCase):
+    """复核窗口内重抽帧的时刻计算 直接决定模型能看到多密的动作"""
+
+    def test_one_second_step_covers_window(self):
+        # 六秒窗口按一秒间隔出七张 末帧压在终点内侧
+        stamps = m.frame_timestamps(10.0, 16.0, 1.0)
+        self.assertEqual(len(stamps), 7)
+        self.assertEqual(stamps[:6], [10.0, 11.0, 12.0, 13.0, 14.0, 15.0])
+        self.assertTrue(15.0 < stamps[-1] < 16.0)
+
+    def test_limit_widens_step_instead_of_dropping_tail(self):
+        # 帧数受限时放宽间隔 不能只抽前几秒把后半段的换端动作漏掉
+        stamps = m.frame_timestamps(0.0, 20.0, 1.0, limit=4)
+        self.assertEqual(len(stamps), 4)
+        self.assertGreaterEqual(stamps[-1], 14.0)
+
+    def test_last_stamp_never_reaches_end(self):
+        # 末帧落在窗口终点会被 seek 到下一段 内容错位
+        stamps = m.frame_timestamps(0.0, 3.0, 1.0)
+        self.assertTrue(all(stamp < 3.0 for stamp in stamps))
+
+    def test_empty_window(self):
+        self.assertEqual(m.frame_timestamps(5.0, 5.0, 1.0), [])
+
+    def test_no_video_file_returns_empty(self):
+        evidence = VideoEvidence(duration=30, slices=[], has_audio=False)
+        self.assertEqual(evidence.extract_frames_at(0, 10), [])
+
+
+class MergeFramesTest(unittest.TestCase):
+    """0 分项要全片帧与窗口密帧一起给 重复时刻只留一张"""
+
+    def test_near_duplicates_dropped(self):
+        base = [Frame(seconds=10.0, data="a"), Frame(seconds=12.0, data="b")]
+        extra = [Frame(seconds=10.2, data="c"), Frame(seconds=11.0, data="d")]
+        merged = s._merge_frames(base, extra)
+        self.assertEqual([frame.data for frame in merged], ["a", "d", "b"])
 
 
 if __name__ == "__main__":

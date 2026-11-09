@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # 二次补证: 仅对证据受限的评分项切连续片段重判 关闭后只用一轮关键帧
     MEDIA_SUPPLEMENT_ENABLED: bool = True
     MEDIA_SUPPLEMENT_CLIPS: int = 6
+    # 复核片段在窗口内重新抽帧的张数与长边上限 密度与分辨率都高于首轮
+    # 手指抵基座这类接触点在 1024 宽的帧里只剩十几个像素 复核得回到原片分辨率才看得清
+    MEDIA_SUPPLEMENT_FRAMES: int = 12
+    MEDIA_SUPPLEMENT_FRAME_WIDTH: int = 1920
     # 外部 ffmpeg 可执行文件路径 为空时依次尝试 PATH 与 imageio-ffmpeg 内置二进制
     FFMPEG_BINARY: Optional[str] = None
     # 规则管理页口令 为空则管理页禁用(用户名固定 admin)

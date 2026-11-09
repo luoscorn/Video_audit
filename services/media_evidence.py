@@ -56,6 +56,9 @@ _MAX_SLICE_AUDIO_SECONDS = 120  # 单片音频上限 避免单次转写超限
 _CLIP_MAX_WIDTH = 720
 _CLIP_CRF = 28
 
+# 复核重抽帧参数: 首轮关键帧平均两秒一张 换端/探入间隙这类瞬时动作必落在两帧之间
+_SUPPLEMENT_FRAME_STEP = 1.0   # 复核窗口内的抽帧间隔秒数
+
 # 下载与 ffmpeg 超时
 _DOWNLOAD_TIMEOUT = (10, 300)
 _MAX_VIDEO_BYTES = 1024 ** 3
@@ -107,6 +110,8 @@ class VideoEvidence:
     has_audio: bool
     spoken_slices: int = 0   # 有语音转写内容的切片数
     video_path: str = ""     # 本地视频文件 供二次补证切片 为空表示已清理
+    video_width: int = 0     # 原片像素宽 复核重抽帧时据此算缩放比例
+    video_height: int = 0
 
     @property
     def frame_count(self) -> int:
@@ -143,6 +148,34 @@ class VideoEvidence:
         step = (len(picked) - 1) / (limit - 1)
         return [picked[round(index * step)] for index in range(limit)]
 
+    def extract_frames_at(
+        self,
+        start: float,
+        end: float,
+        limit: int = 0,
+        step: float = _SUPPLEMENT_FRAME_STEP,
+        edge: int = 0,
+    ) -> list["Frame"]:
+        """在窗口内按固定间隔重新抽帧 供二次复核看清瞬间动作
+
+        首轮关键帧是「全片挑画面变化最大」的结果 平均两秒一张
+        某段动作通常只分到一两张 换端、探入间隙这类瞬时动作恰好落在两帧之间
+        复核时按窗口重新密集抽取 密度只由窗口长度和帧上限决定
+        :param limit: 帧数上限 0 表示不限
+        :param edge: 长边上限 0 表示沿用首轮的 MEDIA_FRAME_WIDTH
+        """
+        if not self.video_path or end <= start:
+            return []
+        timestamps = frame_timestamps(start, end, step, limit)
+        if not timestamps:
+            return []
+        save_dir = os.path.join(os.path.dirname(self.video_path), "reframe")
+        os.makedirs(save_dir, exist_ok=True)
+        return _extract_frames(
+            self.video_path, timestamps, save_dir,
+            self.video_width, self.video_height, edge,
+        )
+
     def describe(self) -> str:
         """一行日志描述"""
         return (
@@ -174,6 +207,20 @@ def _fmt_time(seconds: float) -> str:
     """秒转 mm:ss"""
     total = int(max(0, seconds))
     return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def frame_timestamps(start: float, end: float, step: float, limit: int = 0) -> list[float]:
+    """窗口内按固定间隔取时刻 超出帧上限时自动放宽间隔 末帧不越过窗口终点"""
+    span = end - start
+    if span <= 0:
+        return []
+    step = max(0.2, float(step or 0.2))
+    count = int(span / step) + 1
+    if limit and count > limit:
+        count = max(1, int(limit))
+        step = span / count
+    last = max(start, round(end - 0.05, 2))
+    return sorted({min(last, round(start + index * step, 2)) for index in range(count)})
 
 
 def _ffmpeg_binary() -> str:
@@ -366,9 +413,9 @@ def _uniform_timestamps(duration: float, count: int) -> list[float]:
     return [round(step * (i + 0.5), 2) for i in range(count)]
 
 
-def _frame_scale(width: int, height: int) -> Optional[str]:
-    """关键帧输出尺寸: 长边压到 MEDIA_FRAME_WIDTH 以内 小片不放大"""
-    limit = settings.MEDIA_FRAME_WIDTH
+def _frame_scale(width: int, height: int, edge: int = 0) -> Optional[str]:
+    """关键帧输出尺寸: 长边压到 edge(默认 MEDIA_FRAME_WIDTH) 以内 小片不放大"""
+    limit = edge or settings.MEDIA_FRAME_WIDTH
     if width <= 0 or height <= 0 or limit <= 0:
         return None
     scale = min(1.0, limit / max(width, height))
@@ -394,11 +441,11 @@ def _extract_frame(video_path: str, seconds: float, out_path: str,
 
 
 def _extract_frames(video_path: str, timestamps: list[float], save_dir: str,
-                   width: int, height: int) -> list[Frame]:
+                   width: int, height: int, edge: int = 0) -> list[Frame]:
     """并发抽取指定时刻的关键帧 返回按时间升序的帧列表"""
     if not timestamps:
         return []
-    size = _frame_scale(width, height)
+    size = _frame_scale(width, height, edge)
     jobs = [
         (ts, os.path.join(save_dir, f"frame{i}.jpg"))
         for i, ts in enumerate(timestamps)
@@ -538,6 +585,8 @@ def prepare_evidence(video_url: str, max_slices: int = _MAX_SLICES) -> VideoEvid
             has_audio=has_audio,
             spoken_slices=spoken,
             video_path=video_path,
+            video_width=width,
+            video_height=height,
         )
         if not evidence.has_evidence:
             raise RuntimeError("未能抽取到任何画面或语音证据")
