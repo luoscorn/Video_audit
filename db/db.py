@@ -37,33 +37,46 @@ async def init_db():
     await _ensure_columns()
 
 
-_RULE_ITEM_NEW_COLUMNS = {
-    # 列名 -> (期望的列定义, 期望的 data_type)
-    "remark": (
-        "text null comment '备注 写入打分提示词作为该项补充判定说明'",
-        "text",
-    ),
+_RULE_NEW_COLUMNS = {
+    # 表名 -> {列名: (期望的列定义, 期望的 data_type)}
+    # 注意: DDL 文本里不能出现百分号字面量
+    # asyncmy 的 mogrify 用 `args is not None` 判断, 无参语句收到空元组仍会走 Python 的 % 格式化
+    # 会抛 TypeError: not enough arguments for format string
+    "score_rule_set": {
+        "dimension": ("varchar(64) null comment '一级维度 填写后统一覆盖各评分项的维度'", "varchar"),
+        "full_score": ("decimal(6,2) null comment '类目打分总分 用于校验评分项分值合计'", "decimal"),
+    },
+    "score_rule_item": {
+        "remark": (
+            "text null comment '备注 写入打分提示词作为该项补充判定说明'",
+            "text",
+        ),
+        "oral_visual_weight": ("varchar(64) null comment '口述视觉权重 例 口述20 视觉80 写入打分提示词'", "varchar"),
+        "oral_keywords": ("text null comment '口述关键词 写入打分提示词'", "text"),
+        "image_refs": ("text null comment '操作图片 每行一个 OSS key 或 http 直链 仅管理页展示'", "text"),
+    },
 }
 
 
 async def _ensure_columns():
-    """给已存在的 score_rule_item 补新增列并纠正列类型 create_all 不会改动已建好的表"""
+    """给已存在的规则表补新增列并纠正列类型 create_all 不会改动已建好的表"""
     if engine.dialect.name != "mysql":
         return
     async with engine.begin() as conn:
-        for column, (ddl, expected_type) in _RULE_ITEM_NEW_COLUMNS.items():
-            existing = await conn.exec_driver_sql(
-                "select data_type from information_schema.columns "
-                "where table_schema = database() and table_name = 'score_rule_item' "
-                f"and column_name = '{column}'"
-            )
-            row = existing.first()
-            if row is None:
-                await conn.exec_driver_sql(f"alter table score_rule_item add column {column} {ddl}")
-                logger.info("score_rule_item 补列: %s", column)
-            elif str(row[0]).lower() != expected_type:
-                await conn.exec_driver_sql(f"alter table score_rule_item modify column {column} {ddl}")
-                logger.info("score_rule_item 列类型修正: %s -> %s", column, expected_type)
+        for table, columns in _RULE_NEW_COLUMNS.items():
+            for column, (ddl, expected_type) in columns.items():
+                existing = await conn.exec_driver_sql(
+                    "select data_type from information_schema.columns "
+                    "where table_schema = database() and table_name = %s and column_name = %s",
+                    (table, column),
+                )
+                row = existing.first()
+                if row is None:
+                    await conn.exec_driver_sql(f"alter table {table} add column {column} {ddl}")
+                    logger.info("%s 补列: %s", table, column)
+                elif str(row[0]).lower() != expected_type:
+                    await conn.exec_driver_sql(f"alter table {table} modify column {column} {ddl}")
+                    logger.info("%s 列类型修正: %s -> %s", table, column, expected_type)
 
 
 async def close_db():
@@ -227,6 +240,18 @@ async def get_rule_items(session: AsyncSession, rule_set_id: int) -> list[ScoreR
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def count_rule_items(session: AsyncSession, rule_set_ids: list[int]) -> dict[int, int]:
+    """批量统计各规则集的评分项数 返回 {rule_set_id: 项数} 无评分项的版本不出现在结果里"""
+    if not rule_set_ids:
+        return {}
+    stmt = (
+        select(ScoreRuleItem.rule_set_id, func.count(ScoreRuleItem.id))
+        .where(ScoreRuleItem.rule_set_id.in_(rule_set_ids))
+        .group_by(ScoreRuleItem.rule_set_id)
+    )
+    return {row[0]: int(row[1]) for row in (await session.execute(stmt)).all()}
+
+
 async def create_rule_draft(
     session: AsyncSession,
     audit_type: str,
@@ -264,7 +289,10 @@ async def save_rule_draft(
     remark: str | None = None,
     operator: str | None = None,
 ) -> None:
-    """全量覆盖保存草稿: 评分项先删后插 保证顺序与页面一致"""
+    """全量覆盖保存草稿: 评分项先删后插 保证顺序与页面一致
+
+    规则集上的维度/类目打分总分由调用方直接赋在 rule_set 上 随本次 commit 一起落库
+    """
     rule_set.remark = remark or rule_set.remark
     rule_set.operator = operator or rule_set.operator
     if content is not None:

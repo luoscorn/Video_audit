@@ -122,6 +122,12 @@
     button.primary:hover { background: #1d4ed8; border-color: #1d4ed8; color: #fff; }
     button.danger { color: var(--danger); border-color: #f3c9c9; background: #fff; }
     button.danger:hover { color: #fff; background: var(--danger); border-color: var(--danger); }
+    /* 终态操作: 发布后立即影响线上打分 与「保存草稿」用不同色阶区分 */
+    button.publish { background: var(--ok); border-color: var(--ok); color: #fff; box-shadow: 0 1px 2px rgba(4, 120, 87, .26); }
+    button.publish:hover { background: #036c4d; border-color: #036c4d; color: #fff; }
+    /* 低频危险操作: 不做实心红 避免与发布按钮并排误点 */
+    button.ghost-danger { color: var(--danger); border-color: #f3c9c9; background: #fff; padding: 5px 11px; font-size: 12px; }
+    button.ghost-danger:hover { color: #fff; background: var(--danger); border-color: var(--danger); }
     button.del { padding: 2px 8px; border: 1px solid transparent; background: transparent; color: #c3c8d1; font-size: 15px; border-radius: 6px; }
     button.del:hover { color: var(--danger); background: var(--danger-weak); border-color: #f3c9c9; }
 
@@ -148,10 +154,15 @@
       border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
     }
     .toolbar .spacer { flex: 1; }
+    .toolbar .group { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .toolbar .group.end { margin-left: auto; }
+    .toolbar .dirty-tip { color: var(--warn); font-size: 12px; }
 
     pre.preview { background: #0f172a; color: #e2e8f0; padding: 16px 18px; border-radius: var(--radius); overflow: auto; font-size: 12px; line-height: 1.75; max-height: 520px; margin: 0; }
-    .preview-head { display: flex; align-items: center; justify-content: space-between; margin: 28px 0 10px; }
+    .preview-head { display: flex; align-items: center; justify-content: space-between; margin: 28px 0 10px; gap: 12px; }
     .preview-head h2 { margin: 0; }
+    .preview-head .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .preview-head h2 .hint { margin-left: 10px; font-weight: 400; }
 
     .empty { padding: 40px 20px; text-align: center; color: var(--muted); font-size: 13px; }
     .search { max-width: 280px; }
@@ -159,6 +170,55 @@
     .filter button { padding: 6px 12px; font-size: 13px; }
     .filter button.on { border-color: var(--brand); color: var(--brand); background: var(--brand-weak); }
     .row-flex { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: space-between; }
+
+    /* 评分细则表格 与线下评分表版式对齐 */
+    .dim-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 14px 0 0; }
+    .dim-bar > label { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
+    .dim-bar input { flex: 0 1 320px; border-color: var(--line); background: #fff; }
+    .rubric-sheet { margin-top: 8px; border: 1px solid var(--line-strong); border-radius: var(--radius); overflow: auto; background: var(--surface); box-shadow: var(--shadow); max-height: calc(100vh - 240px); }
+    table.rubric { table-layout: fixed; border-collapse: separate; border-spacing: 0; }
+    table.rubric th, table.rubric td { border-right: 1px solid #eceef2; border-bottom: 1px solid #eceef2; vertical-align: top; }
+    table.rubric tr > *:last-child { border-right: none; }
+    table.rubric thead th, table.rubric thead td { position: static; background: #fff; border-bottom: 1px solid #eceef2; }
+    table.rubric thead .title-row th { background: #f3f4f6; text-align: center; font-size: 14px; font-weight: 650; letter-spacing: 1px; padding: 9px 12px; }
+    table.rubric thead .meta-row td { padding: 5px 10px; font-size: 13px; }
+    table.rubric thead .meta-name { font-weight: 600; }
+    table.rubric thead .meta-key { background: #f9fafb; color: var(--ink-2); white-space: nowrap; }
+    table.rubric thead .meta-val { color: var(--ink-2); }
+    table.rubric thead .head-row th { background: #f9fafb; color: var(--ink-2); font-size: 12px; font-weight: 650; text-align: center; padding: 7px 10px; position: sticky; top: 0; z-index: 2; }
+    table.rubric tbody td { padding: 5px 8px; }
+    table.rubric tbody td.idx { text-align: center; font-weight: 600; padding-top: 10px; }
+    /* 多维度分组: 每个维度前插一行分隔 让连续行看得出属于哪个类目 */
+    table.rubric tbody tr.dim-row td {
+      background: #f7f9fc; border-bottom: 1px solid var(--line-strong);
+      font-size: 12px; font-weight: 600; color: var(--ink-2); letter-spacing: .4px;
+      padding: 4px 10px;
+    }
+    table.rubric tbody tr.dim-row .dim-tag { display: inline-flex; align-items: center; gap: 6px; }
+    table.rubric tbody tr.dim-row .dim-tag::before { content: ""; width: 3px; height: 12px; border-radius: 2px; background: var(--brand); }
+    table.rubric tbody td.op { padding-top: 9px; }
+    table.rubric td.center { text-align: center; font-variant-numeric: tabular-nums; }
+    table.rubric tfoot td { background: #fafafa; font-weight: 600; padding: 6px 10px; border-bottom: none; }
+    table.rubric tfoot .sum-label { text-align: center; font-weight: 500; color: var(--ink-2); }
+    table.rubric tfoot td.center { font-variant-numeric: tabular-nums; }
+    input.full-score { width: 68px; display: inline-block; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
+    .check-pass { color: var(--ok); }
+    .check-fail { color: var(--danger); }
+    .check-pending { color: var(--muted); font-weight: 500; }
+    .rubric-sheet .empty { padding: 28px 20px; }
+
+    /* 操作图片单元格 */
+    .thumbs { display: flex; flex-wrap: wrap; gap: 6px; }
+    .thumb { position: relative; display: inline-block; line-height: 0; }
+    .thumb img { width: 56px; height: 42px; object-fit: cover; border-radius: 4px; border: 1px solid var(--line); display: block; }
+    .thumb-ph { display: inline-flex; align-items: center; justify-content: center; width: 56px; height: 42px; border-radius: 4px; border: 1px dashed var(--line-strong); color: var(--muted); font-size: 11px; line-height: 1.2; }
+    button.thumb-del { position: absolute; top: -7px; right: -7px; padding: 0; width: 17px; height: 17px; min-width: 0; justify-content: center; font-size: 11px; line-height: 1; border-radius: 50%; border: 1px solid var(--line-strong); background: #fff; color: var(--muted); }
+    button.thumb-del:hover { color: #fff; background: var(--danger); border-color: var(--danger); }
+    button.img-add { margin-top: 6px; padding: 3px 9px; font-size: 12px; border-style: dashed; color: var(--muted); }
+    button.img-add:hover { color: var(--brand); border-color: var(--brand); }
+    textarea.cell-text { min-height: 40px; line-height: 1.55; resize: vertical; font-size: 12.5px; }
+    textarea.remark-line { min-height: 0; margin-top: 2px; font-size: 12px; color: var(--ink-2); border-top: 1px dashed var(--line); }
+    table.rubric th .col-tip { display: block; font-weight: 400; font-size: 11px; color: var(--muted); letter-spacing: 0; }
     @media (max-width: 720px) {
       main { padding: 16px; }
       .stat { flex: 1 1 120px; }

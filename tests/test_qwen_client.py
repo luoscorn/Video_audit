@@ -6,6 +6,7 @@
 运行: ./venv/bin/python -m unittest discover -s tests -v
 """
 
+import base64
 import logging
 import unittest
 
@@ -64,6 +65,21 @@ class FormatRubricTest(unittest.TestCase):
         text = q._format_rubric(_items())
         self.assertIn("备注：第一行 第二行", text)
         self.assertIn("视频识别依据：手指支撑", text)
+
+    def test_oral_fields_are_rendered(self):
+        item = RubricItem(
+            dimension="基本", number="③", point="覆盖全口牙列", evidence="探针依次移动",
+            score=0.1, oral_visual_weight="口述100%", oral_keywords="右上、左上\n左下、右下",
+        )
+        text = q._format_rubric([item])
+        self.assertIn("口述视觉权重：口述100%", text)
+        # 多行关键词压成单行 避免打散提示词排版
+        self.assertIn("口述关键词：右上、左上 左下、右下", text)
+
+    def test_oral_fields_absent_when_empty(self):
+        text = q._format_rubric(_items())
+        self.assertNotIn("口述视觉权重：", text)
+        self.assertNotIn("口述关键词：", text)
 
 
 class AssembleResultTest(unittest.TestCase):
@@ -153,10 +169,112 @@ class FinalizeResultTest(unittest.TestCase):
         self.assertEqual(result["deductions"], [])
 
 
+class ReferenceImageTest(unittest.TestCase):
+    """规范参考图: 每项首图 总张数受限 下载失败跳过"""
+
+    def setUp(self):
+        self._original_data_uri = q._image_data_uri
+        q._reference_cache.clear()
+
+    def tearDown(self):
+        q._image_data_uri = self._original_data_uri
+        q._reference_cache.clear()
+
+    def _item(self, number: str, image_refs: str = "") -> RubricItem:
+        return RubricItem(
+            dimension="", number=number, point="要点", evidence="", score=1.0,
+            image_refs=image_refs,
+        )
+
+    def test_only_first_image_per_item(self):
+        q._image_data_uri = lambda ref: f"data:uri:{ref}"
+        images = q._reference_images([
+            self._item("①", "rule-admin/a/1.jpg\nrule-admin/a/2.jpg"),
+            self._item("②", "https://cdn.example/2.png"),
+            self._item("③"),
+        ])
+        self.assertEqual([label for label, _ in images], ["参考图 ①", "参考图 ②"])
+        # 多图只取首张 无图项跳过
+        self.assertEqual(images[0][1], "data:uri:rule-admin/a/1.jpg")
+        self.assertEqual(images[1][1], "data:uri:https://cdn.example/2.png")
+
+    def test_capped_by_max_images(self):
+        q._image_data_uri = lambda ref: f"data:uri:{ref}"
+        items = [self._item(str(idx), f"k{idx}.jpg") for idx in range(20)]
+        self.assertEqual(len(q._reference_images(items)), q._MAX_REFERENCE_IMAGES)
+
+    def test_download_failure_skips_image(self):
+        q._image_data_uri = lambda ref: ""
+        self.assertEqual(q._reference_images([self._item("①", "k.jpg")]), [])
+
+    def test_builds_base64_and_hits_cache(self):
+        calls = []
+
+        def fake_url(oss_key, expired=None):
+            calls.append(("sign", oss_key))
+            return f"https://oss.example/{oss_key}"
+
+        class _Resp:
+            headers = {"content-type": "image/png"}
+            content = b"png-bytes"
+
+            def raise_for_status(self):
+                pass
+
+        def fake_get(url, timeout=None):
+            calls.append(("get", url))
+            return _Resp()
+
+        original_url, original_get = q.get_object_url, q.requests.get
+        q.get_object_url, q.requests.get = fake_url, fake_get
+        try:
+            uri = q._image_data_uri("rule-admin/a/1.png")
+            self.assertTrue(uri.startswith("data:image/png;base64,"))
+            self.assertEqual(
+                uri.split(",", 1)[1], base64.b64encode(b"png-bytes").decode()
+            )
+            # 第二次命中进程内缓存 不重复签名与下载
+            self.assertEqual(q._image_data_uri("rule-admin/a/1.png"), uri)
+            self.assertEqual(len(calls), 2)
+        finally:
+            q.get_object_url, q.requests.get = original_url, original_get
+
+    def test_returns_empty_on_download_error(self):
+        original_get = q.requests.get
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("network down")
+
+        q.requests.get = boom
+        try:
+            self.assertEqual(q._image_data_uri("https://cdn.example/x.jpg"), "")
+        finally:
+            q.requests.get = original_get
+
+    def test_reference_block_precedes_candidate_evidence(self):
+        content = q._build_user_content(
+            "http://example/video.mp4", None, "打分", [("参考图 ①", "https://x/1.jpg")]
+        )
+        self.assertIn("不是考生本人的操作证据", content[0]["text"])
+        self.assertEqual(
+            [entry["type"] for entry in content], ["text", "text", "image_url", "video_url", "text"]
+        )
+        self.assertEqual(content[-1]["text"], "打分")
+
+    def test_no_reference_keeps_original_shape(self):
+        content = q._build_user_content("http://example/video.mp4", None, "打分")
+        self.assertEqual([entry["type"] for entry in content], ["video_url", "text"])
+
+
 class PromptPolicyTest(unittest.TestCase):
     def test_gradient_single_source_of_truth(self):
         # 档位百分比只允许出现在 _SCORING_POLICY 若其它片段复制档位 改档时必然漏改
-        for fragment in (q._EVIDENCE_NOTE, q._RUBRIC_OUTPUT_FORMAT, q._SUPPLEMENT_POLICY):
+        for fragment in (
+            q._EVIDENCE_NOTE,
+            q._RUBRIC_OUTPUT_FORMAT,
+            q._SUPPLEMENT_POLICY,
+            q._REFERENCE_NOTE,
+        ):
             self.assertNotIn("85%~100%", fragment)
             self.assertNotIn("60%~85%", fragment)
 

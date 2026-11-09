@@ -272,12 +272,35 @@ def _sample_candidates(video_path: str, duration: float) -> list[tuple[float, by
     return candidates
 
 
+def _gap_fill_index(selected: list[int], times: list[float], max_gap: float) -> int:
+    """找当前最大时间空档内的中间候选帧 空档都不超过 max_gap 时返回 -1
+
+    纯按画面差异贪心会在动作密集的片段堆帧 而在镜头几乎不变的关键动作段留出空洞
+    （口镜到位、支点建立这类姿态变化小但判定关键的时刻最容易落在空洞里）
+    """
+    ordered = sorted(selected, key=lambda idx: times[idx])
+    bounds = [times[0], *[times[idx] for idx in ordered], times[-1]]
+    best_lo, best_hi, best_gap = 0.0, 0.0, max_gap
+    for lo, hi in zip(bounds, bounds[1:]):
+        if hi - lo > best_gap:
+            best_lo, best_hi, best_gap = lo, hi, hi - lo
+    if best_gap <= max_gap:
+        return -1
+
+    mid = (best_lo + best_hi) / 2
+    taken = set(selected)
+    for idx in sorted(range(len(times)), key=lambda i: abs(times[i] - mid)):
+        if idx not in taken and best_lo < times[idx] < best_hi:
+            return idx
+    return -1
+
+
 def _select_timestamps(candidates: list[tuple[float, bytes]], count: int) -> list[float]:
     """
     从候选帧里挑出 count 个时刻: 优先画面差异大的帧 同时保证时间分散
 
-    逐次选「与已选帧最小差异最大」的帧 差异用像素字节的汉明距离衡量
-    差异接近时由时间间隔决定 相机固定/画面几乎不变的视频会退化为均匀抽帧
+    先补最大时间空档（不超过 span/count 的 1.5 倍） 再逐次选「与已选帧最小差异最大」的帧
+    差异用像素字节的汉明距离衡量 差异接近时由时间间隔决定
 
     :return: 按时间升序排列的时刻
     """
@@ -290,10 +313,17 @@ def _select_timestamps(candidates: list[tuple[float, bytes]], count: int) -> lis
     times = [t for t, _ in candidates]
     total_bits = len(candidates[0][1]) * 8
     span = max(1e-6, times[-1] - times[0])
+    max_gap = span / count * 1.5
 
     selected = [len(candidates) // 2]   # 从时间中点起步 首帧落在片中
     chosen = {selected[0]}
     while len(selected) < count:
+        gap_idx = _gap_fill_index(selected, times, max_gap)
+        if gap_idx >= 0:
+            chosen.add(gap_idx)
+            selected.append(gap_idx)
+            continue
+
         best_idx, best_score = -1, -1.0
         for idx in range(len(candidates)):
             if idx in chosen:

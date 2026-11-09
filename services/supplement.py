@@ -23,12 +23,7 @@ from utils.oss_client import delete_object, get_object_url, upload_file
 
 logger = logging.getLogger(__name__)
 
-# 命中这些关键词才二次复核 避免对明确违规项做无谓的模型调用
-_EVIDENCE_LIMIT_KEYWORDS = (
-    "证据受限", "证据不足", "看不清", "无法看清", "不清晰", "模糊", "遮挡", "镜头",
-    "未见", "未观察", "看不到", "无法确认", "无法判断", "无法分辨", "画面未", "未显示",
-)
-# 已明确看到违规的项 不再浪费片段名额去复核
+# 已明确看到违规的项排在证据不足项之后 不因关键词而整项跳过复核
 _VIOLATION_KEYWORDS = (
     "错误", "颠倒", "污染", "跨越", "无支点", "超范围", "绕过", "伤害",
     "次数不足", "时长不足", "相反", "矛盾",
@@ -88,18 +83,20 @@ def _clip_window(start: float, end: float, duration: float) -> tuple[float, floa
 
 
 def _needs_supplement(item: dict) -> bool:
-    """未拿满分且理由指向证据不足 或整项零分时 需要补证复核"""
-    if float(item["score"]) >= float(item["full_score"]) - 0.01:
-        return False
+    """未拿满分的项全部进入候选
+
+    稀疏关键帧下模型常把「看不清」写成「未使用」「未稳定」，用关键词白名单判断
+    必然漏掉本该复核的项（支点类拿 50% 但没命中任何词就会跳过复核）
+    因此只排除满分项，复核名额交给 _plan_clips 按优先级分配
+    """
+    return float(item["score"]) < float(item["full_score"]) - 0.01
+
+
+def _plan_priority(item: dict) -> tuple[int, float]:
+    """排序键: 证据不足项先复核，同组内扣分多的优先占用片段名额"""
     reason = item.get("reason") or ""
-    if not reason:
-        return True
-    if any(keyword in reason for keyword in _EVIDENCE_LIMIT_KEYWORDS):
-        return True
-    if any(keyword in reason for keyword in _VIOLATION_KEYWORDS):
-        return False
-    # 整项零分: 用连续画面复核是否确实未执行 避免稀疏帧误判为未做
-    return float(item["score"]) <= 0.01
+    dirty = any(keyword in reason for keyword in _VIOLATION_KEYWORDS)
+    return (1 if dirty else 0, float(item["score"]) - float(item["full_score"]))
 
 
 def _plan_clips(evidence: VideoEvidence, check_items: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -117,7 +114,7 @@ def _plan_clips(evidence: VideoEvidence, check_items: list[dict]) -> tuple[list[
             continue
         located.append((item, hint))
 
-    located.sort(key=lambda pair: float(pair[0]["full_score"]) - float(pair[0]["score"]), reverse=True)
+    located.sort(key=lambda pair: _plan_priority(pair[0]))
 
     plans: list[dict] = []
     filled = 0

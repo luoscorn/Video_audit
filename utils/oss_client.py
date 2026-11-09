@@ -61,6 +61,19 @@ def upload_file(
     return url
 
 
+def upload_bytes(data: bytes, oss_key: str, bucket: Optional[str] = None) -> str:
+    """
+    上传内存中的字节内容到 OSS（小文件场景 如管理页图片）
+
+    :param data: 文件内容
+    :param oss_key: OSS 上的对象键(路径)
+    :param bucket: 存储桶名称，默认使用配置中的 OSS_BUCKET
+    :return: 对象键(路径) 需要访问时用 get_object_url 签名
+    """
+    get_oss_bucket(bucket).put_object(oss_key, data)
+    return oss_key
+
+
 def list_objects(
     prefix: str = "",
     bucket: Optional[str] = None,

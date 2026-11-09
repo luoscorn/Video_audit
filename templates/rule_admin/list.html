@@ -15,10 +15,9 @@
 </div>
 
 <div class="stats">
-  <div class="stat"><b>{{ ns.published }}</b><span>已入库类型</span></div>
-  <div class="stat"><b>{{ rows | length - ns.published }}</b><span>未入库（走兜底）</span></div>
+  <div class="stat"><b>{{ ns.published }} / {{ rows | length }}</b><span>已入库类型 / 总数</span></div>
+  <div class="stat"><b>{{ rows | length - ns.published }}</b><span>未入库（走兜底链路）</span></div>
   <div class="stat"><b>{{ ns.draft }}</b><span>待发布草稿</span></div>
-  <div class="stat"><b>{{ rows | length }}</b><span>审核类型总数</span></div>
 </div>
 
 <div class="row-flex" style="margin-bottom:12px">
@@ -37,9 +36,10 @@
   <table>
     <thead>
       <tr>
-        <th style="width:240px">审核类型</th>
-        <th style="width:150px">生效版本</th>
-        <th>来源</th>
+        <th style="width:210px">审核类型</th>
+        <th style="width:120px">生效版本</th>
+        <th style="width:150px">内容规模</th>
+        <th style="width:110px">来源</th>
         <th style="width:150px">发布时间</th>
         <th style="width:140px">草稿</th>
         <th style="width:86px"></th>
@@ -55,17 +55,28 @@
         <td><a href="/admin/rules/{{ row.audit_type | urlencode }}">{{ row.audit_type }}</a></td>
         {% if active %}
           <td><span class="badge ok">v{{ active.version }}</span> <span class="hint">{{ active.kind }}</span></td>
-          <td class="hint">{{ active.source or '-' }}</td>
+          <td class="hint num">
+            {% if active.kind == 'rubric' %}
+              {{ row.state.active_items }} 项{% if active.full_score is not none %} · {{ '%g'|format(active.full_score|float) }} 分{% endif %}
+            {% else %}
+              文本 {{ (active.content or '')|length }} 字
+            {% endif %}
+          </td>
+          <td class="hint">{{ SOURCE_LABELS.get(active.source) or active.source or '-' }}</td>
           <td class="hint num">{{ active.published_at.strftime('%Y-%m-%d %H:%M') if active.published_at else '-' }}</td>
         {% else %}
           <td><span class="badge muted">未入库</span></td>
+          <td class="hint num">-</td>
           <td class="hint">兜底链路</td>
           <td class="hint">-</td>
         {% endif %}
         <td>
-          {% if draft %}<span class="badge draft">v{{ draft.version }} 待发布</span>{% else %}<span class="hint">无</span>{% endif %}
+          {% if draft %}
+            <span class="badge draft">v{{ draft.version }} 待发布</span>
+            {% if draft.kind == 'rubric' %}<span class="hint">{{ row.state.draft_items }} 项</span>{% endif %}
+          {% else %}<span class="hint">无</span>{% endif %}
         </td>
-        <td><a class="btn" href="/admin/rules/{{ row.audit_type | urlencode }}" onclick="event.stopPropagation()">编辑</a></td>
+        <td><a class="btn" href="/admin/rules/{{ row.audit_type | urlencode }}" onclick="event.stopPropagation()">{{ '编辑' if draft else '查看' }}</a></td>
       </tr>
     {% endfor %}
     </tbody>

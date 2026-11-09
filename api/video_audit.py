@@ -135,6 +135,13 @@ async def get_task_result(
     result_data = None
     if result:
         rj = result.result_json or {}
+        items = rj.get("items") or []
+        if not isinstance(items, list):
+            items = []
+        # 兜底项统计透出给前端 让「模型没返回」与「学员没做到」在展示上能分开
+        fallback_count = sum(
+            1 for item in items if isinstance(item, dict) and item.get("fallback")
+        )
         # 历史结果可能未写入等级 按当前规则现算一次 保证前端总能拿到判定
         grade = evaluate_grade(rj)
         result_data = {
@@ -148,7 +155,9 @@ async def get_task_result(
             "deductions": rj.get("deductions", []),
             "deduction_count": len(rj.get("deductions", [])),
             "scoring_mode": rj.get("scoring_mode", "text"),
-            "items": rj.get("items", []),
+            "items": items,
+            "fallback_count": fallback_count,
+            "supplement": rj.get("supplement"),
             "summary": rj.get("summary", ""),
             "create_time": _format_datetime(result.create_time),
             "update_time": _format_datetime(result.update_time),

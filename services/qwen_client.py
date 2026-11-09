@@ -3,15 +3,19 @@
 # @File    : qwen_client.py
 """千问 VL 视频打分客户端 — 支持整段视频与「切片关键帧 + 语音转写」两种输入"""
 
+import base64
 import json
 import logging
 import re
+import time
 from typing import Optional
 
+import requests
 from openai import OpenAI
 
 from config import settings
 from services.media_evidence import VideoEvidence, frames_payload
+from utils.oss_client import get_object_url
 from utils.score_rubric import RubricItem
 
 logger = logging.getLogger(__name__)
@@ -33,6 +37,13 @@ _MISSING_SCORE_RATIO = 0.6
 _MISSING_ITEM_REASON = "模型未返回该评分项 判定缺失 按证据受限档下限暂记 需人工复核"
 # summary 长度上限 与 _SCORING_POLICY 声明的 60 字保持一致
 _SUMMARY_MAX_CHARS = 60
+# 规范参考图总张数上限 每项只取首图 避免叠加切片关键帧后单请求图片过多
+_MAX_REFERENCE_IMAGES = 8
+# 参考图下载超时 与 进程内缓存时长(参考图随规则版本固定 改图会换 key)
+_REFERENCE_TIMEOUT = 15.0
+_REFERENCE_CACHE_TTL = 600
+_REFERENCE_CACHE_LIMIT = 200
+_reference_cache: dict[str, tuple[float, str]] = {}
 
 
 # 模型偶发用 1 / (1) / ①) 这类写法 统一归到 ① 形式再与评分项匹配
@@ -61,6 +72,11 @@ _SCORING_POLICY = """【评分尺度：按评分表严格判定 该扣必扣 但
    - 口述与画面分开识别、各自归属：口述内容归到它描述的评分点，画面动作归到它实际对应的评分点。同一时刻口述在说 A 而画面在做 B，是两个不同评分点的证据，不构成矛盾，不得据此扣 A 的分，也不得把 B 计到 A 上。
    - 只有针对同一个评分点、口述与画面相互排斥时才算矛盾（如该项口述说用大弯端，画面清楚显示用的是三弯端），以画面为准给 0~20%，reason 同时写出“口述原文”与画面依据。
    - 各项判定以有经验考官现场评分会给出的结论为基准：不因照顾学员感受把未达标写成满分，也不因拍摄条件局限把合格操作判为未执行。
+   - 否定性结论必须给出反证：确认为未执行或给低分时，reason 必须写出关键帧里与该评分点直接冲突的具体画面；若只是画面未拍到、角度欠佳、细节模糊，一律表述为「证据受限」并按证据受限档给分，禁止写成「未使用」「未执行」「未做到」「不稳定」。
+   - 口镜牵拉只看镜面是否到位：画面中口镜工作端（镜面）抵住或撑开一侧口角、颊侧黏膜，即认定「口镜牵拉口角」达成，不要求看到软组织明显变形（牙模型口角不易形变），也不要求全程持续。
+   - 模型牙/仿真头模是标准考核场景：不得以「不是在患者口腔内」「模型无牙龈、无唾液、无真实口角」为由扣分或降档，只按动作在模型上是否规范完成判定。
+   - 持续型姿态按出现过即认定：口镜牵拉口角、无名指支点、执笔式握持这类是维持性姿态，只要若干关键帧中出现过该姿态即认定达成，不要求看到动作全过程；相邻帧之间姿态的短暂变化不构成支点不稳。
+   - 手部持械分工只看两手是否各持不同器械：镜头存在镜像、左右判读有歧义时，只要画面中两手分别持用不同器械（一为口镜、一为探针）即视为分工明确，不得仅因左右手判反或口镜用途未逐帧可见而判该项未执行。
 5. summary 只写总体结论：用一两句话概括整体完成情况与主要失分方向（不超过 60 字），不逐条罗列失分点、不复述各扣分明细（细节放在对应 items 的 reason 里），不使用表扬、鼓励式表述，也不写空泛套话。"""
 
 # 切片输入的证据说明
@@ -68,6 +84,10 @@ _EVIDENCE_NOTE = """【证据说明】本次输入是按时间轴组织的视频
 关键帧取自画面变化最明显的时刻（换器械、换部位、开始/结束动作），标签中的 @mm:ss 是该帧的准确时刻。口述内容与画面动作要分开归属到各自的评分点，再只看同一评分点内两者是否相互排斥，不要因为同一时刻口述与画面在别的事上就判矛盾，也不要跳片段混用证据。
 关键帧数量有限，动作可能落在两帧之间、被遮挡或处于镜头外：口述已把动作要素说清时仍按第 2 条第 1 档给满分；口述也未交代时才算证据受限，按评分尺度的证据受限档给分并在 reason 注明“证据受限”，任何情况下都不得据此判为未执行。
 口述（语音转写）是本次考核的完成依据：口述把动作要素说清即给满分，不因画面未清晰呈现扣分；只有同一评分点内口述与画面相互排斥时，才以画面为准。"""
+
+# 规范参考图说明: 图来自评分标准的正确操作示意 只能当规范参照 不能当考生证据
+_REFERENCE_NOTE = """【规范参考图说明】下面先给出若干张来自评分标准的标准操作示意图，用于说明该项要求的规范形态（器械选型、握持方式、位置等），帮助你判断考生做法是否规范。
+参考图不是考生本人的操作证据：不得因为某项配了参考图就推定考生已完成该评分点，也不得把参考图里的画面当作考生画面引用。每一项都必须依据考生视频的关键帧与语音转写判定，参考图只用于比对“规范”与“不规范”的差别。"""
 
 # 要求 AI 返回的 JSON 结构说明
 _OUTPUT_FORMAT = """请严格按照以下 JSON 格式返回打分结果，不要输出任何多余内容：
@@ -212,13 +232,60 @@ def _build_system_prompt(
     return "\n".join(parts)
 
 
+def _image_data_uri(ref: str) -> str:
+    """操作图片转 data URI: OSS key 先预签名再下载 http 直链直接下载 失败返回空串
+
+    与关键帧一样用 base64 内联 不把外链交给模型去拉 避免签名过期或模型侧抓取失败
+    """
+    cached = _reference_cache.get(ref)
+    if cached is not None and time.time() - cached[0] < _REFERENCE_CACHE_TTL:
+        return cached[1]
+    try:
+        url = ref if ref.startswith(("http://", "https://")) else get_object_url(oss_key=ref, expired=3600)
+        resp = requests.get(url, timeout=_REFERENCE_TIMEOUT)
+        resp.raise_for_status()
+        mime = (resp.headers.get("content-type") or "").split(";")[0].strip()
+        if not mime.startswith("image/"):
+            mime = "image/jpeg"
+        data_uri = f"data:{mime};base64,{base64.b64encode(resp.content).decode()}"
+    except Exception:
+        logger.warning("规范参考图获取失败 已跳过: %s", ref, exc_info=True)
+        return ""
+    if len(_reference_cache) >= _REFERENCE_CACHE_LIMIT:
+        _reference_cache.clear()
+    _reference_cache[ref] = (time.time(), data_uri)
+    return data_uri
+
+
+def _reference_images(rubric_items: list[RubricItem]) -> list[tuple[str, str]]:
+    """收集各评分项的首张操作图片作为规范参考图 总张数受 _MAX_REFERENCE_IMAGES 约束"""
+    images: list[tuple[str, str]] = []
+    for item in rubric_items:
+        if len(images) >= _MAX_REFERENCE_IMAGES:
+            break
+        ref = item.first_image
+        if not ref:
+            continue
+        data_uri = _image_data_uri(ref)
+        if data_uri:
+            images.append((f"参考图 {item.number}", data_uri))
+    return images
+
+
 def _build_user_content(
     video_url: str,
     evidence: Optional[VideoEvidence],
     instruction: str,
+    reference_images: Optional[list[tuple[str, str]]] = None,
 ) -> list[dict]:
-    """构造用户消息: 有切片证据时送关键帧 + 语音转写 否则送整段视频"""
+    """构造用户消息: 规范参考图 + 证据(切片关键帧+语音 或 整段视频) + 判分指令"""
     content: list[dict] = []
+    if reference_images:
+        # 参考图放在考生证据之前 并显式声明非考生证据 避免模型把规范图当成本次操作画面
+        content.append({"type": "text", "text": _REFERENCE_NOTE})
+        for label, url in reference_images:
+            content.append({"type": "text", "text": f"{label}："})
+            content.append({"type": "image_url", "image_url": {"url": url}})
     if evidence is None:
         content.append({"type": "video_url", "video_url": {"url": video_url}})
     else:
@@ -304,6 +371,12 @@ def _format_rubric(rubric_items: list[RubricItem]) -> str:
         lines.append(f"{item.number} {item.point}（{item.score:g}分）")
         if item.evidence:
             lines.append(f"  视频识别依据：{item.evidence}")
+        weight = _inline(getattr(item, "oral_visual_weight", ""))
+        if weight:
+            lines.append(f"  口述视觉权重：{weight}")
+        keywords = _inline(getattr(item, "oral_keywords", ""))
+        if keywords:
+            lines.append(f"  口述关键词：{keywords}")
         remark = _inline(getattr(item, "remark", ""))
         if remark:
             lines.append(f"  备注：{remark}")
@@ -340,16 +413,19 @@ def score_video_with_rubric(
         _RUBRIC_OUTPUT_FORMAT,
         evidence,
     )
+    reference_images = _reference_images(rubric_items)
     user_content = _build_user_content(
         video_url,
         evidence,
         "请根据上述评分规则逐项打分，以 JSON 格式返回结果。",
+        reference_images,
     )
 
     logger.info(
-        "开始调用千问 API 逐项打分, audit_type=%s, items=%d, 输入=%s",
+        "开始调用千问 API 逐项打分, audit_type=%s, items=%d, 规范参考图=%d张, 输入=%s",
         audit_type,
         len(rubric_items),
+        len(reference_images),
         "切片关键帧+语音" if evidence is not None else "整段视频",
     )
     raw_text = _call_model(system_prompt, user_content, audit_type)
@@ -446,7 +522,8 @@ def _reask_missing(
         evidence,
     )
     user_content = _build_user_content(
-        video_url, evidence, "请只对上述评分项打分，以 JSON 格式返回结果。"
+        video_url, evidence, "请只对上述评分项打分，以 JSON 格式返回结果。",
+        _reference_images(targets),
     )
     data = _parse_json(_call_model(system_prompt, user_content, audit_type))
     patch = data.get("items")

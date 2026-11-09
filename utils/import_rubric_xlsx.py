@@ -13,6 +13,9 @@
 import argparse
 import asyncio
 import logging
+from typing import Optional
+
+from openpyxl import load_workbook
 
 from db import db as dao
 from utils.audit_type import AuditType
@@ -30,17 +33,45 @@ def _rows_of(items) -> list[dict]:
             "number": item.number,
             "point": item.point,
             "evidence": item.evidence,
+            "oral_visual_weight": item.oral_visual_weight,
+            "oral_keywords": item.oral_keywords,
             "remark": "",
+            "image_refs": "",
             "score": item.score,
         }
         for item in items
     ]
 
 
+def _full_score_of(path: str) -> Optional[float]:
+    """从表头区读取「类目打分总分」 读不到返回 None(页面可手填)"""
+    wb = load_workbook(path, data_only=True, read_only=True)
+    try:
+        ws = wb["评分表"] if "评分表" in wb.sheetnames else wb.worksheets[0]
+        for row in ws.iter_rows(min_row=1, max_row=8, values_only=True):
+            cells = [str(v).strip() if v is not None else "" for v in row]
+            if "类目打分总分" not in cells:
+                continue
+            for value in cells[cells.index("类目打分总分") + 1:]:
+                try:
+                    score = float(value.replace("分", ""))
+                except ValueError:
+                    continue
+                return round(score, 2) if score > 0 else None
+        return None
+    finally:
+        wb.close()
+
+
 async def run(audit_type: AuditType, xlsx_path: str, publish: bool, operator: str) -> int:
     items = parse_xlsx_rubric(xlsx_path)
     total = round(sum(item.score for item in items), 2)
+    full_score = _full_score_of(xlsx_path)
     logger.info("解析 %s: %d 个评分项 合计 %g 分", audit_type.value, len(items), total)
+    if full_score is None:
+        logger.warning("xlsx 未读到「类目打分总分」，导入后请在管理页补填以便校验分值合计")
+    elif abs(full_score - total) >= 0.005:
+        logger.warning("分值合计 %g 与类目打分总分 %g 不一致，导入后请在管理页核对", total, full_score)
 
     async with dao.AsyncSessionLocal() as session:
         draft = await dao.get_latest_draft(session, audit_type.value)
@@ -62,6 +93,7 @@ async def run(audit_type: AuditType, xlsx_path: str, publish: bool, operator: st
             remark=f"从 {xlsx_path.split('/')[-1]} 导入",
             operator=operator,
         )
+        rule_set.full_score = full_score
         await dao.save_rule_draft(session, rule_set, _rows_of(items), operator=operator)
         logger.info("已写入草稿 v%s（%d 项）", rule_set.version, len(items))
 

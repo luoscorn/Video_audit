@@ -1,35 +1,122 @@
 {% extends "rule_admin/base.html" %}
 {% block title %}{{ audit_type }} · 打分规则管理{% endblock %}
 
-{% macro item_table(rows, editable) %}
-<div class="table-wrap">
-  <table>
+{% macro item_table(rows, editable, sheet=None) %}
+{# sheet 用于展示非当前待编辑版本的表格（历史版本查看） 不给则取页面上下文 #}
+{% set sheet = sheet or {} %}
+{% set v_target = sheet.get('target', target) %}
+{% set v_full_score = sheet.get('full_score', full_score) %}
+{% set v_total = sheet.get('total_score', total_score) %}
+{% set v_check = sheet.get('check_pass', check_pass) %}
+{% set v_source = sheet.get('source', source) %}
+{% set ns = namespace(dims=[]) %}
+{% for row in rows %}
+  {% set dim = (row.dimension or '') | trim %}
+  {% if dim and dim not in ns.dims %}{% set ns.dims = ns.dims + [dim] %}{% endif %}
+{% endfor %}
+{% set multi_dim = ns.dims | length > 1 %}
+<div class="rubric-sheet">
+  <table class="rubric">
+    <colgroup>
+      <col style="width:56px">
+      <col style="width:21%">
+      <col>
+      <col style="width:70px">
+      <col style="width:150px">
+      <col style="width:150px">
+      <col style="width:170px">
+      <col style="width:40px">
+    </colgroup>
     <thead>
-      <tr>
-        <th style="width:44px">#</th>
-        <th style="width:170px">一级维度</th>
-        <th style="width:84px">编号</th>
-        <th style="width:26%">细分评分点</th>
-        <th>视频识别依据</th>
-        <th style="width:180px">备注</th>
-        <th style="width:84px">分值</th>
-        <th style="width:44px"></th>
+      <tr class="title-row"><th colspan="8">视频识别评分细则</th></tr>
+      <tr class="meta-row">
+        <td colspan="2" class="meta-name">{{ audit_type }}</td>
+        <td class="meta-key">版本 / 日期</td>
+        <td colspan="4" class="meta-val">
+          {% if v_target %}
+            {% set stamp = v_target.published_at or v_target.update_time %}
+            v{{ v_target.version }}{% if stamp %} · {{ stamp.strftime('%Y-%m-%d') }}{% endif %}
+          {% else %}
+            尚未入库
+          {% endif %}
+        </td>
+        <td></td>
+      </tr>
+      <tr class="meta-row">
+        <td colspan="2" class="meta-name">
+          {% if editable %}
+            <input name="full_score" class="full-score" value="{{ '%g'|format(v_full_score) if v_full_score is not none else '' }}" placeholder="类目总分"> 分
+          {% else %}
+            {{ '%g'|format(v_full_score) if v_full_score is not none else '-' }} 分
+          {% endif %}
+        </td>
+        <td class="meta-key">来源</td>
+        <td colspan="4" class="meta-val">{{ SOURCE_LABELS.get(v_source) or v_source }}</td>
+        <td></td>
+      </tr>
+      <tr class="head-row">
+        <th>编号</th>
+        <th>细分评分点</th>
+        <th>视频识别依据<span class="col-tip">写进提示词，作为该项的判定说明</span></th>
+        <th>分值</th>
+        <th>口述视觉权重</th>
+        <th>口述关键词</th>
+        <th>操作图片<span class="col-tip">首张作为规范参考图送模型</span></th>
+        <th></th>
       </tr>
     </thead>
     <tbody id="items-body">
     {% for row in rows %}
-      <tr>
-        <td class="idx">{{ loop.index }}</td>
-        <td><input name="dimension" value="{{ row.dimension or '' }}" {% if not editable %}disabled{% endif %}></td>
-        <td><input name="number" class="num" value="{{ row.number or '' }}" {% if not editable %}disabled{% endif %}></td>
-        <td><input name="point" value="{{ row.point or '' }}" {% if not editable %}disabled{% endif %}></td>
-        <td><input name="evidence" value="{{ row.evidence or '' }}" {% if not editable %}disabled{% endif %}></td>
-        <td><textarea name="remark" class="note" rows="2" placeholder="判定口径 会写进提示词" {% if not editable %}disabled{% endif %}>{{ row.remark or '' }}</textarea></td>
-        <td><input name="score" class="score" value="{{ row.score }}" {% if not editable %}disabled{% endif %}></td>
-        <td class="op">{% if editable %}<button type="button" class="del" title="删除该行" onclick="this.closest('tr').remove(); renumber(); recalc()">×</button>{% endif %}</td>
+      {% set dim = (row.dimension or '') | trim %}
+      {% if multi_dim and (loop.first or ((loop.previtem.dimension or '') | trim) != dim) %}
+        <tr class="dim-row"><td colspan="8"><span class="dim-tag">{{ dim or '未分维度' }}</span></td></tr>
+      {% endif %}
+      <tr class="item-row">
+        <td class="idx"><input name="number" class="num" value="{{ row.number or '' }}" {% if not editable %}disabled{% endif %}></td>
+        <td><textarea name="point" class="note cell-text" rows="2" {% if not editable %}disabled{% endif %}>{{ row.point or '' }}</textarea>
+          <textarea name="remark" class="note cell-text remark-line" rows="1" placeholder="备注（判定口径，会写进提示词）" {% if not editable %}disabled{% endif %}>{{ row.remark or '' }}</textarea>
+          <input type="hidden" name="dimension" value="{{ row.dimension or '' }}"></td>
+        <td><textarea name="evidence" class="note cell-text" rows="2" placeholder="画面里看到什么算做到这一项" {% if not editable %}disabled{% endif %}>{{ row.evidence or '' }}</textarea></td>
+        <td class="center"><input name="score" class="score" value="{{ row.score }}" {% if not editable %}disabled{% endif %}></td>
+        <td><input name="oral_visual_weight" value="{{ row.oral_visual_weight or '' }}" placeholder="口述20% 视觉80%" {% if not editable %}disabled{% endif %}></td>
+        <td><textarea name="oral_keywords" class="note cell-text" rows="2" placeholder="口述应说到的关键词" {% if not editable %}disabled{% endif %}>{{ row.oral_keywords or '' }}</textarea></td>
+        <td class="img-cell">
+          <div class="thumbs">
+            {% for img in row.images or [] %}
+              <span class="thumb" data-ref="{{ img.ref }}">
+                {% if img.url %}
+                  <img src="{{ img.url }}" alt="操作图片" loading="lazy">
+                {% else %}
+                  <span class="thumb-ph" title="{{ img.ref }}">链接不可用</span>
+                {% endif %}
+                {% if editable %}<button type="button" class="thumb-del" title="移除该图" onclick="removeThumb(this)">×</button>{% endif %}
+              </span>
+            {% endfor %}
+          </div>
+          <textarea name="image_refs" class="img-refs" hidden>{{ row.image_refs or '' }}</textarea>
+          {% if editable %}
+            <button type="button" class="img-add" onclick="pickImage(this)">＋ 图片</button>
+            <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden onchange="uploadImage(this)">
+          {% endif %}
+        </td>
+        <td class="op">{% if editable %}<button type="button" class="del" title="删除该行" onclick="this.closest('tr').remove(); recalc()">×</button>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>
+    <tfoot>
+      <tr>
+        <td colspan="3" class="sum-label">分值合计（共 <b id="item-count">{{ rows|length }}</b> 项，应等于类目打分总分）</td>
+        <td class="center" id="total">{{ '%g'|format(v_total) if v_total is not none else '-' }}</td>
+        <td colspan="4"></td>
+      </tr>
+      <tr>
+        <td colspan="3" class="sum-label">校验（分值合计 = 类目打分总分）</td>
+        <td class="center{% if v_check is true %} check-pass{% elif v_check is false %} check-fail{% else %} check-pending{% endif %}" id="check">
+          {% if v_check is true %}通过{% elif v_check is false %}不通过{% else %}未填类目总分{% endif %}
+        </td>
+        <td colspan="4" id="diff-tip" class="hint"></td>
+      </tr>
+    </tfoot>
   </table>
   {% if not rows %}
     <div class="empty">还没有评分项，点下面的「+ 新增评分项」开始录入</div>
@@ -43,7 +130,7 @@
     <h1>{{ audit_type }}</h1>
     <div class="bar" style="margin-top:8px">
       {% if active %}
-        <span class="chip">生效 <b>v{{ active.version }}</b> · {{ active.kind }} · 来源 {{ active.source or '-' }} · 发布 {{ active.published_at.strftime('%Y-%m-%d %H:%M') if active.published_at else '-' }}</span>
+        <span class="chip">生效 <b>v{{ active.version }}</b> · {{ active.kind }} · 来源 {{ SOURCE_LABELS.get(active.source) or active.source or '-' }} · 发布 {{ active.published_at.strftime('%Y-%m-%d %H:%M') if active.published_at else '-' }}</span>
       {% else %}
         <span class="chip">尚未入库 · 打分仍走 OSS xlsx / 镜像内置 txt 兜底</span>
       {% endif %}
@@ -92,83 +179,148 @@
   </div>
 
   {% if kind == 'rubric' %}
-    <div style="margin-top:16px">{{ item_table(rows, true) }}</div>
+    <div class="dim-bar">
+      <label>一级维度</label>
+      <input name="set_dimension" value="{{ set_dimension }}" placeholder="留空则保留各行原维度分组">
+      {% if dimensions %}<span class="hint">现有维度：{{ dimensions|join(' / ') }}</span>{% endif %}
+      {% if dimensions|length > 1 %}<span class="hint">填写后保存会把各行统一为该值</span>{% endif %}
+    </div>
+    {{ item_table(rows, true) }}
   {% else %}
     <p class="notice" style="margin-top:14px"><span class="ico">i</span><span>文本模式：整段规则会原样作为打分提示词中的规则部分，修改后建议先预览。</span></p>
     <textarea name="content" rows="30" class="text">{{ content }}</textarea>
   {% endif %}
 </form>
 
+<div class="card" id="preview-panel" hidden style="margin-top:14px">
+  <div class="preview-head" style="margin-top:0">
+    <h2>提示词预览<span class="hint" id="preview-note"></span></h2>
+    <div class="actions">
+      <button type="button" onclick="copyPreview(this)">复制</button>
+      <button type="button" onclick="togglePreview(document.getElementById('preview-btn'))">收起</button>
+    </div>
+  </div>
+  <div class="card-body" style="padding-top:0">
+    <pre class="preview" id="preview-text" style="margin:0"></pre>
+  </div>
+</div>
+
 <div class="toolbar">
-  {% if kind == 'rubric' %}
-    <button type="button" onclick="addRow()">+ 新增评分项</button>
-    <span class="chip">合计满分 <b id="total">{{ total_score }}</b></span>
-    <span class="hint">备注会以「备注：…」写入打分提示词</span>
-  {% endif %}
-  <span class="spacer"></span>
-  <a class="btn" href="/admin/rules/{{ audit_type | urlencode }}/preview">预览提示词</a>
-  <form method="post" action="/admin/rules/{{ audit_type | urlencode }}/delete"
-        onsubmit="return confirm('确认删除草稿 v{{ draft.version }}？')">
-    <input type="hidden" name="rule_set_id" value="{{ draft.id }}">
-    <button class="danger">删除草稿</button>
-  </form>
-  <form method="post" action="/admin/rules/{{ audit_type | urlencode }}/publish"
-        onsubmit="return confirm('发布后立即对新打分任务生效，原生效版将归档。确认发布 v{{ draft.version }}？')">
-    <input type="hidden" name="rule_set_id" value="{{ draft.id }}">
-    <button class="primary">发布 v{{ draft.version }}</button>
-  </form>
-  <button type="submit" form="edit-form" class="primary">保存草稿</button>
+  <div class="group">
+    {% if kind == 'rubric' %}
+      <button type="button" onclick="addRow()">+ 新增评分项</button>
+    {% endif %}
+    <button type="button" id="preview-btn" onclick="togglePreview(this)">预览提示词</button>
+    {% if kind == 'rubric' %}
+      <span class="hint">口述权重、口述关键词与备注都会写进打分提示词；操作图片首张作为规范参考图随规则送模型</span>
+    {% endif %}
+  </div>
+  <div class="group end">
+    <span class="dirty-tip" id="dirty-tip" hidden>有未保存的修改</span>
+    <button type="submit" form="edit-form" class="primary">保存草稿</button>
+    <form method="post" action="/admin/rules/{{ audit_type | urlencode }}/publish" onsubmit="return confirmPublish()">
+      <input type="hidden" name="rule_set_id" value="{{ draft.id }}">
+      <button class="publish">发布 v{{ draft.version }}</button>
+    </form>
+  </div>
 </div>
 
 {% elif target %}
   <h2>当前生效内容（只读）</h2>
   {% if kind == 'rubric' %}
+    {% if dimensions %}
+      <div class="dim-bar"><span class="hint">一级维度：{{ dimensions|join(' / ') }}</span></div>
+    {% endif %}
     {{ item_table(rows, false) }}
-    <div class="actions"><span class="chip">合计满分 <b>{{ total_score }}</b></span></div>
   {% else %}
     <textarea rows="30" class="text" disabled>{{ content }}</textarea>
   {% endif %}
 {% endif %}
 
+{% if viewing %}
+  {% set view_set = viewing.rule_set %}
+  <div class="preview-head">
+    <h2>v{{ view_set.version }} 内容（只读）
+      <span class="hint">{{ {'active': '生效中', 'draft': '草稿', 'archived': '已归档'}.get(view_set.status, view_set.status) }}{% if view_set.published_at %} · 发布于 {{ view_set.published_at.strftime('%Y-%m-%d %H:%M') }}{% endif %}</span>
+    </h2>
+    <div class="actions">
+      <a class="btn" href="/admin/rules/{{ audit_type | urlencode }}/preview?version={{ view_set.version }}">看提示词</a>
+      <a class="btn" href="/admin/rules/{{ audit_type | urlencode }}">关闭</a>
+    </div>
+  </div>
+  {% if view_set.kind == 'rubric' %}
+    {{ item_table(viewing.rows, false, viewing) }}
+  {% else %}
+    <textarea rows="20" class="text" disabled>{{ view_set.content or '' }}</textarea>
+  {% endif %}
+{% endif %}
+
 {% if preview is not none %}
   <div class="preview-head">
-    <h2>提示词预览</h2>
-    <button type="button" onclick="copyPreview(this)">复制</button>
+    <h2>提示词预览{% if preview_title %}<span class="hint">{{ preview_title }}</span>{% endif %}</h2>
+    <div class="actions">
+      <button type="button" onclick="copyPreview(this)">复制</button>
+      <a class="btn" href="/admin/rules/{{ audit_type | urlencode }}">返回编辑</a>
+    </div>
   </div>
   <pre class="preview" id="preview-text">{{ preview }}</pre>
 {% endif %}
 
-<h2>版本历史</h2>
+<div class="preview-head">
+  <h2>版本历史<span class="hint">共 {{ history|length }} 个版本</span></h2>
+  <div class="actions">
+    {% if history %}
+      <button type="button" id="history-toggle" onclick="toggleHistory(this)">展开</button>
+    {% endif %}
+    {% if draft %}
+      <form method="post" action="/admin/rules/{{ audit_type | urlencode }}/delete"
+            onsubmit="return confirm('确认删除草稿 v{{ draft.version }}？删除后不可恢复。')">
+        <input type="hidden" name="rule_set_id" value="{{ draft.id }}">
+        <button class="ghost-danger">删除当前草稿 v{{ draft.version }}</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
 {% if history %}
-<div class="table-wrap" style="max-height:none">
+<div class="table-wrap" id="history-body" style="max-height:none" hidden>
   <table>
     <thead>
       <tr>
         <th style="width:74px">版本</th>
-        <th style="width:96px">状态</th>
-        <th style="width:84px">类型</th>
-        <th style="width:120px">来源</th>
+        <th style="width:88px">状态</th>
+        <th style="width:64px">类型</th>
+        <th style="width:112px">规模</th>
+        <th style="width:110px">来源</th>
         <th>变更说明</th>
-        <th style="width:100px">操作人</th>
-        <th style="width:150px">更新时间</th>
-        <th style="width:150px">发布时间</th>
+        <th style="width:88px">操作人</th>
+        <th style="width:140px">更新时间</th>
+        <th style="width:140px">发布时间</th>
+        <th style="width:92px"></th>
       </tr>
     </thead>
     <tbody>
     {% for rule_set in history %}
       <tr>
-        <td class="num"><b>v{{ rule_set.version }}</b></td>
+        <td class="num"><a href="/admin/rules/{{ audit_type | urlencode }}?version={{ rule_set.version }}"><b>v{{ rule_set.version }}</b></a></td>
         <td>
           {% if rule_set.status == 'active' %}<span class="badge ok">生效</span>
           {% elif rule_set.status == 'draft' %}<span class="badge draft">草稿</span>
           {% else %}<span class="badge archived">归档</span>{% endif %}
         </td>
         <td class="hint">{{ rule_set.kind }}</td>
-        <td class="hint">{{ rule_set.source or '-' }}</td>
+        <td class="hint num">
+          {% if rule_set.kind == 'rubric' %}
+            {{ history_counts.get(rule_set.id, 0) }} 项{% if rule_set.full_score is not none %} · {{ '%g'|format(rule_set.full_score|float) }} 分{% endif %}
+          {% else %}
+            文本 {{ (rule_set.content or '')|length }} 字
+          {% endif %}
+        </td>
+        <td class="hint">{{ SOURCE_LABELS.get(rule_set.source) or rule_set.source or '-' }}</td>
         <td>{{ rule_set.remark or '' }}</td>
         <td class="hint">{{ rule_set.operator or '-' }}</td>
         <td class="hint num">{{ rule_set.update_time.strftime('%Y-%m-%d %H:%M') if rule_set.update_time else '-' }}</td>
         <td class="hint num">{{ rule_set.published_at.strftime('%Y-%m-%d %H:%M') if rule_set.published_at else '-' }}</td>
+        <td><a class="btn" href="/admin/rules/{{ audit_type | urlencode }}/preview?version={{ rule_set.version }}">看提示词</a></td>
       </tr>
     {% endfor %}
     </tbody>
@@ -179,38 +331,225 @@
 {% endif %}
 
 <script>
-  function renumber() {
-    document.querySelectorAll('#items-body tr').forEach(function (tr, i) {
-      tr.querySelector('.idx').textContent = i + 1;
-    });
-  }
-
   function recalc() {
     var total = 0;
-    document.querySelectorAll('#items-body .score').forEach(function (el) {
+    var scores = document.querySelectorAll('#items-body .score');
+    scores.forEach(function (el) {
       total += parseFloat(el.value) || 0;
     });
+    total = Math.round(total * 100) / 100;
     var box = document.getElementById('total');
-    if (box) box.textContent = Math.round(total * 100) / 100;
+    if (box) box.textContent = total;
+
+    var count = document.getElementById('item-count');
+    if (count) count.textContent = scores.length;
+
+    var check = document.getElementById('check');
+    if (!check) return;
+    var tip = document.getElementById('diff-tip');
+    var fullEl = document.querySelector('input[name="full_score"]');
+    var full = fullEl ? parseFloat(fullEl.value) : NaN;
+    if (!isFinite(full)) {
+      check.textContent = '未填类目总分';
+      check.className = 'center check-pending';
+      if (tip) tip.textContent = '';
+      return;
+    }
+    var pass = Math.abs(total - full) < 0.005;
+    check.textContent = pass ? '通过' : '不通过';
+    check.className = 'center ' + (pass ? 'check-pass' : 'check-fail');
+    // 不通过时直接告诉差多少 免得人自己拿计算器凑
+    if (tip) {
+      tip.textContent = pass ? '' : '差 ' + (Math.round((full - total) * 100) / 100) + ' 分';
+    }
   }
 
   function addRow() {
     var body = document.getElementById('items-body');
     if (!body) return;
     var tr = document.createElement('tr');
-    tr.innerHTML = '<td class="idx"></td>'
-      + '<td><input name="dimension"></td>'
-      + '<td><input name="number" class="num"></td>'
-      + '<td><input name="point"></td>'
-      + '<td><input name="evidence"></td>'
-      + '<td><textarea name="remark" class="note" rows="2" placeholder="判定口径 会写进提示词"></textarea></td>'
-      + '<td><input name="score" class="score" value="1"></td>'
-      + '<td class="op"><button type="button" class="del" title="删除该行" onclick="this.closest(\'tr\').remove(); renumber(); recalc()">×</button></td>';
+    tr.className = 'item-row';
+    tr.innerHTML =
+      '<td class="idx"><input name="number" class="num"></td>'
+      + '<td><textarea name="point" class="note cell-text" rows="2"></textarea>'
+      + '<textarea name="remark" class="note cell-text remark-line" rows="1" placeholder="备注（判定口径，会写进提示词）"></textarea>'
+      + '<input type="hidden" name="dimension" value=""></td>'
+      + '<td><textarea name="evidence" class="note cell-text" rows="2" placeholder="画面里看到什么算做到这一项"></textarea></td>'
+      + '<td class="center"><input name="score" class="score" value="1"></td>'
+      + '<td><input name="oral_visual_weight" placeholder="口述20% 视觉80%"></td>'
+      + '<td><textarea name="oral_keywords" class="note cell-text" rows="2" placeholder="口述应说到的关键词"></textarea></td>'
+      + '<td class="img-cell"><div class="thumbs"></div><textarea name="image_refs" class="img-refs" hidden></textarea>'
+      + '<button type="button" class="img-add" onclick="pickImage(this)">＋ 图片</button>'
+      + '<input type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden onchange="uploadImage(this)"></td>'
+      + '<td class="op"><button type="button" class="del" title="删除该行" onclick="this.closest(\'tr\').remove(); recalc()">×</button></td>';
     body.appendChild(tr);
-    renumber();
     recalc();
     var first = tr.querySelector('input[name="number"]');
     if (first) first.focus();
+  }
+
+  // ===== 未保存修改保护: 离开页面前提醒 防止误丢录入 =====
+  var dirty = false;
+  var dirtyTip = document.getElementById('dirty-tip');
+  var editForm = document.getElementById('edit-form');
+
+  function markDirty() {
+    if (dirty) return;
+    dirty = true;
+    if (dirtyTip) dirtyTip.hidden = false;
+  }
+
+  if (editForm) {
+    editForm.addEventListener('input', markDirty);
+    editForm.addEventListener('change', markDirty);
+    editForm.addEventListener('submit', function () {
+      dirty = false;
+      if (dirtyTip) dirtyTip.hidden = true;
+    });
+    window.addEventListener('beforeunload', function (e) {
+      if (!dirty) return;
+      e.preventDefault();
+      e.returnValue = '';
+    });
+    document.addEventListener('click', function (e) {
+      if (!dirty || !e.target.closest) return;
+      var link = e.target.closest('a');
+      if (!link || link.target === '_blank') return;
+      var href = link.getAttribute('href') || '';
+      if (!href || href.charAt(0) === '#' || href.indexOf('javascript:') === 0) return;
+      if (!window.confirm('有未保存的修改，离开将丢失。确认离开？')) e.preventDefault();
+    });
+    // 单行输入里回车会提交整张表 录入编号与分值时极易误触 统一拦下
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter' || !e.target || e.target.tagName !== 'INPUT') return;
+      var type = e.target.type;
+      if (type === 'submit' || type === 'button' || type === 'file') return;
+      e.preventDefault();
+    });
+  }
+
+  function confirmPublish() {
+    if (dirty) {
+      alert('页面上的修改还没保存。发布会提交数据库中已有的草稿内容，请先点「保存草稿」。');
+      return false;
+    }
+    return window.confirm('发布后立即对新打分任务生效，原生效版将归档。确认发布？');
+  }
+
+  // ===== 操作图片: 上传到 OSS 后把引用写回 hidden textarea =====
+  function syncRefs(tr) {
+    var box = tr.querySelector('textarea.img-refs');
+    if (!box) return;
+    var refs = [];
+    tr.querySelectorAll('.thumbs .thumb').forEach(function (el) {
+      var ref = el.getAttribute('data-ref');
+      if (ref) refs.push(ref);
+    });
+    box.value = refs.join('\n');
+  }
+
+  function removeThumb(btn) {
+    var span = btn.closest('.thumb');
+    var tr = btn.closest('tr');
+    if (span) span.remove();
+    if (tr) syncRefs(tr);
+  }
+
+  function addThumb(tr, ref, url) {
+    var box = tr.querySelector('.thumbs');
+    if (!box || !ref) return;
+    var span = document.createElement('span');
+    span.className = 'thumb';
+    span.setAttribute('data-ref', ref);
+    var img = document.createElement('img');
+    img.src = url || '';
+    img.alt = '操作图片';
+    img.loading = 'lazy';
+    span.appendChild(img);
+    var del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'thumb-del';
+    del.title = '移除该图';
+    del.textContent = '×';
+    del.addEventListener('click', function () { removeThumb(del); });
+    span.appendChild(del);
+    box.appendChild(span);
+    syncRefs(tr);
+  }
+
+  function pickImage(btn) {
+    var input = btn.parentNode.querySelector('input[type="file"]');
+    if (input) input.click();
+  }
+
+  function uploadImage(input) {
+    var file = input.files && input.files[0];
+    if (!file) return;
+    var tr = input.closest('tr');
+    var btn = tr ? tr.querySelector('.img-add') : null;
+    var label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '上传中…'; }
+
+    var body = new FormData();
+    body.append('file', file);
+    fetch(location.pathname.replace(/\/$/, '') + '/upload-image', {
+      method: 'POST', body: body, credentials: 'same-origin'
+    }).then(function (resp) {
+      return resp.json().catch(function () { return {}; }).then(function (data) {
+        if (!resp.ok) throw new Error(data.detail || ('上传失败 ' + resp.status));
+        addThumb(tr, data.key, data.url);
+      });
+    }).catch(function (err) {
+      alert(err.message || '图片上传失败');
+    }).finally(function () {
+      input.value = '';
+      if (btn) { btn.disabled = false; btn.textContent = label; }
+    });
+  }
+
+  // ===== 提示词预览: 页内展开 不用跳页后丢失录入位置 =====
+  function togglePreview(btn) {
+    var panel = document.getElementById('preview-panel');
+    if (!panel || !btn) return;
+    if (!panel.hidden) {
+      panel.hidden = true;
+      btn.textContent = '预览提示词';
+      return;
+    }
+    btn.disabled = true;
+    fetch(location.pathname.replace(/\/$/, '') + '/preview', { credentials: 'same-origin' })
+      .then(function (resp) {
+        if (!resp.ok) throw new Error('预览失败 ' + resp.status);
+        return resp.text();
+      })
+      .then(function (html) {
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        var src = doc.getElementById('preview-text');
+        var box = document.getElementById('preview-text');
+        if (box) box.textContent = src ? src.textContent : '（没有可预览的内容）';
+        var note = document.getElementById('preview-note');
+        if (note) {
+          note.textContent = dirty
+            ? '基于已保存的草稿生成，页面上的未保存修改不在其中'
+            : '基于已保存的草稿生成';
+        }
+        panel.hidden = false;
+        btn.textContent = '收起预览';
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      })
+      .catch(function (err) {
+        alert(err.message || '预览失败');
+      })
+      .finally(function () { btn.disabled = false; });
+  }
+
+  // ===== 版本历史默认折叠 需要时再展开 =====
+  function toggleHistory(btn) {
+    var body = document.getElementById('history-body');
+    if (!body) return;
+    var open = body.hidden;
+    body.hidden = !open;
+    btn.textContent = open ? '收起' : '展开';
   }
 
   function copyPreview(btn) {
@@ -236,7 +575,9 @@
   }
 
   document.addEventListener('input', function (e) {
-    if (e.target.classList && e.target.classList.contains('score')) recalc();
+    var cls = e.target.classList;
+    if (!cls) return;
+    if (cls.contains('score') || e.target.name === 'full_score') recalc();
   });
 </script>
 {% endblock %}

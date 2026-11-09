@@ -51,6 +51,9 @@ def to_rubric_items(rows) -> list[RubricItem]:
             evidence=row.evidence or "",
             score=round(float(row.score), 2),
             remark=row.remark or "",
+            oral_visual_weight=row.oral_visual_weight or "",
+            oral_keywords=row.oral_keywords or "",
+            image_refs=row.image_refs or "",
         )
         for row in rows
     ]
@@ -106,6 +109,9 @@ def items_from_rows(rows) -> list[RubricItem]:
             evidence=row.get("evidence") or "",
             score=round(float(row.get("score") or 0), 2),
             remark=row.get("remark") or "",
+            oral_visual_weight=row.get("oral_visual_weight") or "",
+            oral_keywords=row.get("oral_keywords") or "",
+            image_refs=row.get("image_refs") or "",
         )
         for row in rows
     ]

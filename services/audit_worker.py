@@ -37,12 +37,35 @@ _task_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_TASKS)
 # 错误信息命中这些关键词说明多模态输入本身被拒 才回退整段视频
 _INPUT_REJECT_KEYWORDS = ("image", "multimodal", "invalid_parameter", "unsupported", "data_inspection")
 
+# 400 里混着大量与输入无关的成因（模型下线、欠费、配额、鉴权）
+# 这些情况回退整段视频既丢证据又必然重试失败 必须先排除再按 400 处理
+_NON_INPUT_400_KEYWORDS = (
+    "model_not_found", "model not found", "arrearage", "insufficient balance",
+    "quota", "rate limit", "throttl", "flow control",
+    "api key", "apikey", "authentication", "unauthorized",
+    "access denied", "forbidden", "permission",
+)
+
+# 后台任务强引用集合 asyncio 事件循环只持弱引用
+# 不自己保存引用时任务可能在跑完前被 GC 回收 表现为日志说「已触发」但状态永久卡在 0
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    """创建后台任务并持有引用直到它结束"""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 
 def _is_input_rejected(exc: Exception) -> bool:
-    """判断失败是否由“关键帧输入被模型拒绝”引起 限流/超时/网络类错误保留证据重试"""
+    """判断失败是否由“关键帧输入被模型拒绝”引起 限流/超时/鉴权/欠费类错误保留证据重试"""
+    message = str(exc).lower()
+    if any(keyword in message for keyword in _NON_INPUT_400_KEYWORDS):
+        return False
     if getattr(exc, "status_code", None) == 400:
         return True
-    message = str(exc).lower()
     return any(keyword in message for keyword in _INPUT_REJECT_KEYWORDS)
 
 
@@ -81,9 +104,9 @@ async def _process_audit_task(task_id: int) -> None:
 
     流程:
     1. 查任务 → 更新状态为进行中
-    2. 从 oss_url 解析 oss_key → 生成预签名 URL 给 AI
-    3. 视频切片抽帧 + 逐片语音转写（失败回退整段视频）
-    4. 加载打分规则（数据库生效版优先 无生效版回落 xlsx 结构化 / docx 文本）
+    2. 加载打分规则（数据库生效版优先 无生效版回落 xlsx 结构化 / docx 文本）
+    3. 从 oss_url 解析 oss_key → 生成预签名 URL 给 AI
+    4. 视频切片抽帧 + 逐片语音转写（失败回退整段视频）
     5. 调用千问按严格尺度逐项打分（标有画面/语音证据才给分 未达标即扣）
     6. 解析结果 → 写入 result 表 → 更新状态为完成
     7. 异常时更新状态为异常
@@ -115,34 +138,8 @@ async def _process_audit_task(task_id: int) -> None:
             await update_task_status(session, task_id, 1)
             logger.info("[Worker]   状态更新: 待处理 → 进行中")
 
-            # 3. 生成视频预签名 URL（给 AI 读视频用，有效期 2 小时）
-            oss_key = _extract_object_key(task.oss_url)
-            video_url = get_object_url(oss_key=oss_key, expired=7200)
-            logger.info("[Worker]   视频URL已生成 (oss_key=%s)", oss_key)
-
-            # 3.5 抽取打分证据：视频切片关键帧 + 逐片语音转写
-            #     失败不阻断流程 仅回退为整段视频打分
-            evidence = None
-            if settings.AUDIT_MEDIA_ENABLED:
-                media_start = time.time()
-                try:
-                    media_task = await asyncio.to_thread(prepare_evidence, video_url)
-                    evidence = media_task
-                    logger.info(
-                        "[Worker]   切片抽帧+语音转写完成: %s (耗时 %.1fs)",
-                        evidence.describe(),
-                        time.time() - media_start,
-                    )
-                    transcript = evidence.transcript_text()
-                    if transcript:
-                        logger.debug("[Worker]   语音转写摘要: %s", transcript[:300])
-                except Exception as exc:
-                    evidence = None
-                    logger.warning("[Worker]   切片/语音抽取失败 回退整段视频打分: %s", exc)
-            else:
-                logger.info("[Worker]   切片/语音抽取已关闭(AUDIT_MEDIA_ENABLED=false)")
-
-            # 4. 加载打分规则：数据库生效版优先，无生效版回落 OSS xlsx / 本地 txt
+            # 3. 加载打分规则：数据库生效版优先，无生效版回落 OSS xlsx / 本地 txt
+            #    必须先于抽帧与语音转写 规则缺失时立刻失败 不白烧几十秒下载/抽帧/ASR 费用
             audit_type = AuditType(task.audit_type)
             bundle = await load_rule_bundle(session, audit_type)
             rubric_items = bundle.rubric_items
@@ -164,6 +161,33 @@ async def _process_audit_task(task_id: int) -> None:
                     bundle.source,
                     version_label,
                 )
+
+            # 4. 生成视频预签名 URL（给 AI 读视频用，有效期 2 小时）
+            oss_key = _extract_object_key(task.oss_url)
+            video_url = get_object_url(oss_key=oss_key, expired=7200)
+            logger.info("[Worker]   视频URL已生成 (oss_key=%s)", oss_key)
+
+            # 4.5 抽取打分证据：视频切片关键帧 + 逐片语音转写
+            #     失败不阻断流程 仅回退为整段视频打分
+            evidence = None
+            if settings.AUDIT_MEDIA_ENABLED:
+                media_start = time.time()
+                try:
+                    media_task = await asyncio.to_thread(prepare_evidence, video_url)
+                    evidence = media_task
+                    logger.info(
+                        "[Worker]   切片抽帧+语音转写完成: %s (耗时 %.1fs)",
+                        evidence.describe(),
+                        time.time() - media_start,
+                    )
+                    transcript = evidence.transcript_text()
+                    if transcript:
+                        logger.debug("[Worker]   语音转写摘要: %s", transcript[:300])
+                except Exception as exc:
+                    evidence = None
+                    logger.warning("[Worker]   切片/语音抽取失败 回退整段视频打分: %s", exc)
+            else:
+                logger.info("[Worker]   切片/语音抽取已关闭(AUDIT_MEDIA_ENABLED=false)")
 
             # 5. 调用 AI 打分（带重试）
             logger.info("[Worker]   正在调用 AI 打分 (最多重试%d次)...", _MAX_RETRIES)
@@ -206,6 +230,19 @@ async def _process_audit_task(task_id: int) -> None:
             if result is None:
                 raise RuntimeError(f"AI 打分重试 {_MAX_RETRIES} 次仍失败: {last_error}")
 
+            # 结构化模式必须逐项齐全: 模型返回的项全被服务端丢弃时 items 为空
+            # 此时若继续走总分校正 扣分项也为空会把 total 抬到满分 形成静默假满分
+            rated_items = len(result.get("items") or [])
+            if rubric_items:
+                if rated_items == 0:
+                    raise RuntimeError("AI 未返回任何有效评分项 结果不可用 需重试或人工复核")
+                if rated_items != len(rubric_items):
+                    logger.warning(
+                        "[Worker]   评分项数量不一致: 应有%d项 实际%d项 不按扣分项校正总分",
+                        len(rubric_items),
+                        rated_items,
+                    )
+
             # 5.5 二次补证：对证据受限的评分项切连续片段复核 失败不阻断
             if settings.MEDIA_SUPPLEMENT_ENABLED and rubric_items and evidence is not None:
                 supplement_start = time.time()
@@ -216,6 +253,7 @@ async def _process_audit_task(task_id: int) -> None:
                     if info is None:
                         logger.info("[Worker]   二次补证: 未触发或无可复核片段")
                     else:
+                        # 完整摘要（片段标签/未定位项/逐项变更）由 supplement_rescore 写入 result，此处不覆盖
                         logger.info(
                             "[Worker]   二次补证: 片段%d个 复核%d项 调整%d项 (耗时 %.1fs)",
                             info["clips"],
@@ -241,7 +279,9 @@ async def _process_audit_task(task_id: int) -> None:
             # 服务端校验：total_score 必须 = full_score - sum(deduct_score)
             total_deduct = sum(float(d.get("deduct_score", 0) or 0) for d in deductions)
             expected_score = float(full_score or 0) - total_deduct
-            if abs(float(total_score or 0) - expected_score) > 0.01:
+            if (not rubric_items or rated_items == len(rubric_items)) and abs(
+                float(total_score or 0) - expected_score
+            ) > 0.01:
                 logger.warning(
                     "[Worker]   AI 算分有误: 返回%s 校正为%s (满分%s - 扣分%s)",
                     total_score,
@@ -321,6 +361,6 @@ async def recover_orphan_tasks() -> int:
 
     for task_id in orphan_ids:
         logger.info("[Recovery]   → 重新触发 task_id=%d", task_id)
-        asyncio.create_task(process_audit_task(task_id))
+        _spawn(process_audit_task(task_id))
 
     return len(orphan_ids)

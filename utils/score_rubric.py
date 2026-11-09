@@ -25,6 +25,9 @@ _HEADER_NAMES = {
     "point": "细分评分点",
     "evidence": "视频识别依据",
     "score": "分值",
+    "oral_visual_weight": "口述视觉权重",
+    "oral_keywords": "口述关键词",
+    "image_refs": "操作图片",
 }
 _REQUIRED_COLUMNS = ("number", "point", "score")
 
@@ -38,10 +41,22 @@ class RubricItem:
     evidence: str
     score: float
     remark: str = ""          # 人工备注 会作为补充说明写进打分提示词
+    oral_visual_weight: str = ""   # 口述/视觉权重 如 口述20% 视觉80% 写进打分提示词
+    oral_keywords: str = ""        # 口述关键词 写进打分提示词
+    image_refs: str = ""           # 操作图片 每行一个 OSS key 或 http 直链 首张作为规范参考图送模型
 
     @property
     def label(self) -> str:
         return f"{self.number} {self.point}"
+
+    @property
+    def first_image(self) -> str:
+        """首张操作图片 打分时每项只送首图控制总张数"""
+        for line in (self.image_refs or "").splitlines():
+            ref = line.strip()
+            if ref:
+                return ref
+        return ""
 
 
 # 解析结果缓存: audit_type -> (写入时间, 评分项)
@@ -111,6 +126,9 @@ def parse_xlsx_rubric(path: str | Path) -> list[RubricItem]:
             point=point,
             evidence=cell(row, "evidence"),
             score=round(score, 2),
+            oral_visual_weight=cell(row, "oral_visual_weight"),
+            oral_keywords=cell(row, "oral_keywords"),
+            image_refs=cell(row, "image_refs"),
         ))
 
     if not items:
