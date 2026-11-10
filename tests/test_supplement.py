@@ -8,10 +8,13 @@
 
 import logging
 import unittest
+from contextlib import ExitStack
+from unittest.mock import patch
 
 from services import media_evidence as m
+from services import qwen_client as q
 from services import supplement as s
-from services.media_evidence import Frame, VideoEvidence
+from services.media_evidence import ASR_FAILED_MARK, Frame, VideoEvidence, VideoSlice
 
 
 def setUpModule():
@@ -161,6 +164,26 @@ class FrameTimestampsTest(unittest.TestCase):
         self.assertEqual(evidence.extract_frames_at(0, 10), [])
 
 
+class SupplementTranscriptTest(unittest.TestCase):
+    def test_failed_asr_survives_into_supplement_prompt(self):
+        ev = VideoEvidence(duration=30, has_audio=True, slices=[
+            VideoSlice(index=0, start=0, end=15, asr_failed=True),
+            VideoSlice(index=1, start=15, end=30, transcript="探针", asr_failed=True),
+        ])
+        text = s._transcript_text(ev, 10, 20)
+        self.assertIn(ASR_FAILED_MARK, text)
+        self.assertIn("探针（本段部分语音转写失败）", text)
+        self.assertNotIn("无语音内容", text)
+
+    def test_failed_asr_outside_window_is_excluded(self):
+        ev = VideoEvidence(duration=30, has_audio=True, slices=[
+            VideoSlice(index=0, start=0, end=15, asr_failed=True),
+            VideoSlice(index=1, start=15, end=30, transcript="检查完毕"),
+        ])
+        self.assertNotIn(ASR_FAILED_MARK, s._transcript_text(ev, 15, 30))
+        self.assertIn("检查完毕", s._transcript_text(ev, 15, 30))
+
+
 class MergeFramesTest(unittest.TestCase):
     """0 分项要全片帧与窗口密帧一起给 重复时刻只留一张"""
 
@@ -169,6 +192,85 @@ class MergeFramesTest(unittest.TestCase):
         extra = [Frame(seconds=10.2, data="c"), Frame(seconds=11.0, data="d")]
         merged = s._merge_frames(base, extra)
         self.assertEqual([frame.data for frame in merged], ["a", "d", "b"])
+
+
+class ApplyUpdatesTest(unittest.TestCase):
+    """复核结果合并: 同一项先成组问、仍判 0 再单问 后一轮覆盖前一轮"""
+
+    def _result(self) -> dict:
+        return {
+            "items": [
+                {"number": "②", "point": "口镜牵拉", "score": 0.0, "full_score": 0.2,
+                 "reason": "全程未见口镜"},
+                {"number": "④", "point": "左右手分工", "score": 0.0, "full_score": 0.2,
+                 "reason": "未执行"},
+            ],
+            "deductions": [],
+            "total_score": 0.0,
+        }
+
+    def test_second_round_keeping_original_score_does_not_erase_first_fix(self):
+        # 组问已认出左手持口镜并把分抬上去 单问又说看不清 不能退回“保持原分”的措辞
+        result = self._result()
+        info = s._apply_updates(result, [
+            {"number": "②", "clear": True, "score": 0.2, "reason": "左手持口镜牵拉，达标"},
+            {"number": "②", "clear": False, "score": 0.0, "reason": "片段仍看不清"},
+        ], [], [])
+        self.assertEqual(result["items"][0]["score"], 0.2)
+        self.assertEqual(result["items"][0]["recheck"], "二次补证修正")
+        self.assertEqual(info["changed"], 1)
+
+    def test_from_keeps_the_pre_supplement_score_across_rounds(self):
+        result = self._result()
+        info = s._apply_updates(result, [
+            {"number": "④", "clear": True, "score": 0.1, "reason": "见到口镜"},
+            {"number": "④", "clear": True, "score": 0.2, "reason": "两手分工明确，达标"},
+        ], [], [])
+        self.assertEqual(len(info["changes"]), 1)
+        self.assertEqual(info["changes"][0]["from"], 0.0)
+        self.assertEqual(info["changes"][0]["to"], 0.2)
+        self.assertEqual(result["total_score"], 0.2)
+        # 总分与扣分项按各项重算 ② 仍是 0 只能扣一项
+        self.assertEqual([d["item"] for d in result["deductions"]], ["② 口镜牵拉"])
+
+    def test_contradictory_group_verdict_gets_individual_retry(self):
+        result = self._result()
+        target = {**result["items"][1], "evidence": ""}
+        first = q._parse_supplement(
+            '{"items":[{"number":"④","clear":true,"score":0.2,"reason":"分工不符要求"}]}',
+            [target],
+        )
+        second = [{"number": "④", "clear": True, "score": 0.2, "reason": "左手持口镜、右手持探针，达标"}]
+        ev = VideoEvidence(duration=30, slices=[], has_audio=True, video_path="unused.mp4")
+        plan = {"start": 0, "end": 15, "dense": True, "items": [target]}
+        with ExitStack() as stack:
+            for name, value in [
+                ("_plan_clips", ([plan], [])),
+                ("cut_clip", "unused-clip.mp4"),
+                ("upload_file", None),
+                ("get_object_url", "https://example/clip.mp4"),
+                ("delete_object", None),
+            ]:
+                stack.enter_context(patch.object(s, name, return_value=value))
+            stack.enter_context(patch.object(s.tempfile, "mkdtemp", return_value="unused"))
+            stack.enter_context(patch.object(s.shutil, "rmtree"))
+            stack.enter_context(patch.object(ev, "extract_frames_at", return_value=[]))
+            rescore = stack.enter_context(patch.object(s, "rescore_with_clips", side_effect=[first, second]))
+            info = s.supplement_rescore(ev, [], result, "探诊检查")
+            self.assertEqual(rescore.call_count, 2)
+            self.assertTrue(all(call.kwargs["blind"] for call in rescore.call_args_list))
+        self.assertEqual(info["changed"], 1)
+        self.assertEqual(result["items"][1]["score"], 0.2)
+        self.assertEqual(result["items"][1]["reason"], second[0]["reason"])
+
+    def test_rechecked_counts_distinct_items_not_calls(self):
+        result = self._result()
+        info = s._apply_updates(result, [
+            {"number": "②", "clear": False, "score": 0.0, "reason": "看不清"},
+            {"number": "②", "clear": False, "score": 0.0, "reason": "看不清"},
+            {"number": "④", "clear": True, "score": 0.2, "reason": "达标"},
+        ], [], [])
+        self.assertEqual(info["rechecked"], 2)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,22 @@ class Settings(BaseSettings):
     # 手指抵基座这类接触点在 1024 宽的帧里只剩十几个像素 复核得回到原片分辨率才看得清
     MEDIA_SUPPLEMENT_FRAMES: int = 12
     MEDIA_SUPPLEMENT_FRAME_WIDTH: int = 1920
+    # 规范参考图: 首轮是否携带
+    # 参考图已声明「只帮助理解不构成要求」 却占掉首轮三分之一的图片预算
+    # 实测首轮把 9 项扫完只花 23 秒 属于带着参考图在扫读 默认不送
+    MEDIA_REFERENCE_IMAGES_ENABLED: bool = False
+    # 扣分项投票: 只对已扣分的评分项用同一份证据重判 逐项取中位数
+    # 同一帧首轮判「无名指悬空」、另一轮判「抵在模型下颌基座」 单次结论不可信
+    # 满分项不花调用 全对时零成本; 轮数为 4 时共五票 中位数才拉得开两极
+    MEDIA_VOTE_ENABLED: bool = True
+    MEDIA_VOTE_ROUNDS: int = 4
+    # 冲突仲裁: 各项判定对同一事实给出相反结论时拿同一份证据重判这几项
+    # 补证是链路最后一环 它改完分数后没人回头检查其余项 矛盾结论会直接入库
+    # 检测只走纯文本 无矛盾时不花带证据的调用
+    MEDIA_CONFLICT_ENABLED: bool = True
+    # 千问思考模式: 把推理挪出 reason 字段 但更慢更贵 效果未经 A/B 确认前默认关闭
+    QWEN_ENABLE_THINKING: bool = False
+    QWEN_THINKING_BUDGET: int = 4096
     # 外部 ffmpeg 可执行文件路径 为空时依次尝试 PATH 与 imageio-ffmpeg 内置二进制
     FFMPEG_BINARY: Optional[str] = None
     # 规则管理页口令 为空则管理页禁用(用户名固定 admin)

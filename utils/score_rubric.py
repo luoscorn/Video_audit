@@ -41,7 +41,7 @@ class RubricItem:
     evidence: str
     score: float
     remark: str = ""          # 人工备注 会作为补充说明写进打分提示词
-    oral_visual_weight: str = ""   # 口述/视觉权重 如 口述20% 视觉80% 写进打分提示词
+    oral_visual_weight: str = ""   # 口述/视觉权重 选填无默认值 留空则符合评分标准即满分 填写后写进打分提示词
     oral_keywords: str = ""        # 口述关键词 写进打分提示词
     image_refs: str = ""           # 操作图片 每行一个 OSS key 或 http 直链 打分时作为规范参考图送模型
 

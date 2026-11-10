@@ -3,6 +3,8 @@
 
 视频审计
 f
+# 重建镜像前先删掉旧容器
+# docker rm -f video-audit
 
 # 构建
 docker build -t video-audit:latest .

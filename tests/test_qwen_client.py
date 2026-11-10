@@ -8,6 +8,7 @@
 
 import base64
 import io
+import json
 import logging
 import unittest
 
@@ -39,6 +40,139 @@ class CleanReasonTest(unittest.TestCase):
         }
         for raw, expected in cases.items():
             self.assertEqual(q._clean_reason(raw), expected, raw)
+
+    def test_reasoning_tail_is_cut(self):
+        # 实测模型会把自问自答与再核算写进 reason 前面是判定依据后面全是思考过程
+        cases = {
+            "口述提及“无名指作为支点”；画面@00:26可见右手无名指抵在模型下颌基座，视觉达成；两项均满足，但按规则应直接给满分0.2？不，规则明确“口述20%，视觉80%”为权重分配":
+                "口述提及“无名指作为支点”；画面@00:26可见右手无名指抵在模型下颌基座，视觉达成；两项均满足",
+            "口述明确“三弯端检查邻面”；画面@00:29可见探针三弯端伸入邻间隙，故应得0.2。":
+                "口述明确“三弯端检查邻面”；画面@00:29可见探针三弯端伸入邻间隙",
+            "口述说明大弯端用法；画面@00:26可见大弯端接触咬合面 再核: 仅一次属不完整":
+                "口述说明大弯端用法；画面@00:26可见大弯端接触咬合面",
+            "视觉占80%达成，口述占20%达成，合计达标，给满分0.2分注：实际得分为0.16":
+                "视觉占80%达成，口述占20%达成，合计达标",
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(q._clean_reason(raw), expected, raw)
+
+    def test_plain_reason_untouched(self):
+        text = "画面@00:26可见左手持口镜牵拉左侧口角，镜面到位"
+        self.assertEqual(q._clean_reason(text), text)
+
+    def test_overlong_reason_truncated(self):
+        cleaned = q._clean_reason("画" * 300)
+        self.assertLessEqual(len(cleaned), q._REASON_MAX_CHARS + 1)
+        self.assertTrue(cleaned.endswith("…"))
+
+    def test_pure_reasoning_becomes_empty(self):
+        # 整段都是思考过程时不能退回原文 否则脏文本会当日判定依据入库
+        self.assertEqual(q._clean_reason("但按规则应直接给满分0.2，故应得0.2"), "")
+
+
+class AlignScoreWithReasonTest(unittest.TestCase):
+    """reason 已判定达成 分数却按份额打折时必须把分数提回满分"""
+
+    def test_reason_saying_all_evidence_done_promotes(self):
+        cases = [
+            "视觉占80%达成、口述20%补充，合计达标",
+            "视觉80%+口述20%达成",
+            "画面与口述两项均满足",
+            # 实测原句: 结论落在句尾 前面只是证据叙述
+            "口述占20%、视觉占80%，画面清晰可见三弯端用于邻面，达标",
+            "口述与视觉均支持，达标",
+            "口述完整，视觉可见器械特征，达标",
+            # 实测原句: 结尾直接写“满分”也是结论 不应继续打折
+            "握持姿势稳定，探针控制良好，无滑脱抖动，视觉100%规范，满分",
+        ]
+        for reason in cases:
+            score, promoted = q._align_score_with_reason(0.16, reason, 0.2)
+            self.assertTrue(promoted, reason)
+            self.assertEqual(score, 0.2, reason)
+
+    def test_negative_conclusion_blocks_promotion(self):
+        # “合计达标但支点不稳”不能因为前半句就把扣分抹掉
+        score, promoted = q._align_score_with_reason(0.16, "合计达标，但支点不稳", 0.2)
+        self.assertFalse(promoted)
+        self.assertEqual(score, 0.16)
+
+    def test_partial_wording_is_untouched(self):
+        for reason in (
+            "动作可见但不完整，未覆盖多面",
+            "该端仅单次使用",
+            "部分牙位达标",
+            "基本达成",
+            "未达满分",
+        ):
+            score, promoted = q._align_score_with_reason(0.16, reason, 0.2)
+            self.assertFalse(promoted, reason)
+            self.assertEqual(score, 0.16)
+
+    def test_full_score_and_empty_reason_short_circuit(self):
+        self.assertEqual(q._align_score_with_reason(0.2, "合计达标", 0.2), (0.2, False))
+        self.assertEqual(q._align_score_with_reason(0.16, "", 0.2), (0.16, False))
+
+    def test_assemble_applies_promotion(self):
+        result, _ = q._assemble_result(
+            [
+                {"number": "1", "score": 0.4, "reason": "画面达成、口述也说清，合计达标"},
+                {"number": "2", "score": 1.0, "reason": "角度一致"},
+            ],
+            "",
+            _items(),
+        )
+        self.assertEqual(result["total_score"], 1.5)
+        self.assertEqual(result["deductions"], [])
+
+    def test_supplement_promotion_respects_clear_flag(self):
+        targets = [{"number": "1", "full_score": 0.5}]
+        done = q._parse_supplement(
+            '{"items": [{"number": "1", "clear": true, "score": 0.4, "reason": "画面与口述均达成"}]}',
+            targets,
+        )
+        self.assertEqual(done[0]["score"], 0.5)
+        # clear=false 表示证据仍不足 这一档本来就保留原分 不能因措辞抬分
+        unsure = q._parse_supplement(
+            '{"items": [{"number": "1", "clear": false, "score": 0.4, "reason": "画面与口述均达成"}]}',
+            targets,
+        )
+        self.assertEqual(unsure[0]["score"], 0.4)
+
+    def test_supplement_full_mark_with_failing_reason_is_not_trusted(self):
+        # 实测 126: clear=true、满分 reason 却写「分工不符要求」 合并后分数升了 reason 仍是上一轮的「未执行」
+        out = q._parse_supplement(
+            '{"items": [{"number": "1", "clear": true, "score": 0.5, '
+            '"reason": "口镜仍在托盘内未被拿起，两手未各持口镜与探针，分工不符要求"}]}',
+            [{"number": "1", "full_score": 0.5}],
+        )
+        self.assertFalse(out[0]["clear"])
+        self.assertEqual(out[0]["score"], 0.0)
+
+    def test_supplement_full_mark_with_missing_hand_assignment_is_not_trusted(self):
+        out = q._parse_supplement(
+            json.dumps({"items": [{"number": "1", "clear": True, "score": 0.5, "reason":
+                "托盘内可见口镜，但全程未见左手持口镜、右手持探针的分工状态，实际为单手操作探针、另一手持模型。"}]}),
+            [{"number": "1", "full_score": 0.5}],
+        )
+        self.assertFalse(out[0]["clear"])
+        self.assertEqual(out[0]["score"], 0.0)
+
+    def test_supplement_clear_without_reason_is_not_trusted(self):
+        out = q._parse_supplement(
+            '{"items": [{"number": "1", "clear": true, "score": 0.5, "reason": ""}]}',
+            [{"number": "1", "full_score": 0.5}],
+        )
+        self.assertFalse(out[0]["clear"])
+        self.assertEqual(out[0]["score"], 0.0)
+
+    def test_positive_negations_are_not_verdicts(self):
+        # 「未见戳刺」是正面描述 「画面无法确认但口述完整」是第 1 档 都不算与满分矛盾
+        self.assertFalse(q._contradicts_full_mark(0.1, "@00:26 动作轻柔 未见戳刺牙龈", 0.1))
+        self.assertFalse(q._contradicts_full_mark(0.2, "画面无法确认 口述完整交代顺序", 0.2))
+        # 非满分时写缺陷是正常的部分分档
+        self.assertFalse(q._contradicts_full_mark(0.1, "支点未满足全程稳定", 0.2))
+        self.assertTrue(q._contradicts_full_mark(0.2, "支点悬空，未达标", 0.2))
+        self.assertTrue(q._contradicts_full_mark(0.15, "右手持探针，左手未持口镜，仅稳定模型", 0.15))
 
 
 class CleanSummaryTest(unittest.TestCase):
@@ -83,6 +217,17 @@ class FormatRubricTest(unittest.TestCase):
         text = q._format_rubric(_items())
         self.assertNotIn("口述视觉权重：", text)
         self.assertNotIn("口述关键词：", text)
+
+    def test_group_titles_can_be_suppressed(self):
+        # 只判部分项时维度标题会被模型当成评分项 实测它直接用标题当 number 回结果
+        items = [
+            RubricItem(dimension="器械", number="2", point="口镜牵拉", evidence="", score=0.2),
+            RubricItem(dimension="支点", number="5", point="无名指支点", evidence="", score=0.2),
+        ]
+        text = q._format_rubric(items, group=False)
+        self.assertTrue(text.startswith("2 口镜牵拉"))
+        self.assertNotIn("\n器械", text)
+        self.assertNotIn("\n支点", text)
 
 
 class AssembleResultTest(unittest.TestCase):
@@ -134,7 +279,7 @@ class FinalizeResultTest(unittest.TestCase):
         return '{"items":[{"number":"①","score":0.4,"reason":"支点稍松"}],"summary":"完成度一般"}'
 
     def test_missing_item_is_reasked_with_only_that_item(self):
-        def fake(system_prompt, user_content, audit_type):
+        def fake(system_prompt, user_content, audit_type, temperature=0.1):
             self.calls.append(system_prompt)
             return '{"items":[{"number":"2","score":0.9,"reason":"角度与牙长轴一致"}]}'
 
@@ -170,6 +315,275 @@ class FinalizeResultTest(unittest.TestCase):
         )
         self.assertEqual(result["total_score"], 1.5)
         self.assertEqual(result["deductions"], [])
+
+
+class VoteDeductedItemsTest(unittest.TestCase):
+    """扣分项投票: 只对已扣分项重判 取中位数 样本不齐不凑平均"""
+
+    def setUp(self):
+        self._original_judge = q._judge_items
+
+    def tearDown(self):
+        q._judge_items = self._original_judge
+
+    def _result(self, first_score: float) -> dict:
+        return {
+            "items": [
+                {"number": "①", "score": first_score, "reason": "无名指悬空", "time": "无"},
+                {"number": "②", "score": 1.0, "reason": "角度一致", "time": "@00:10"},
+            ],
+            "summary": "完成度一般",
+        }
+
+    def _mock_scores(self, scores: list):
+        """每次调用只回第一项 返回的分数按顺序取"""
+        seq = iter(scores)
+        last = scores[-1]
+
+        def fake(*args, **kwargs):
+            return [{"number": "①", "score": next(seq, last), "reason": "抵在模型下颌基座", "time": "@00:26"}]
+
+        q._judge_items = fake
+
+    def test_full_score_skips_voting(self):
+        q._judge_items = lambda *a, **kw: self.fail("满分项不应发起投票")
+        self.assertIsNone(
+            q.vote_deducted_items("http://example/video.mp4", _items(), self._result(0.5), "测试项目")
+        )
+
+    def test_majority_restores_full_score(self):
+        # 首轮 0 分 各轮独立判定都认为达标 中位数把扣分推翻
+        self._mock_scores([0.5] * len(q._vote_temperatures()))
+        voted = q.vote_deducted_items(
+            "http://example/video.mp4", _items(), self._result(0.0), "测试项目"
+        )
+        self.assertIsNotNone(voted)
+        self.assertEqual(voted["total_score"], 1.5)
+        self.assertEqual(voted["deductions"], [])
+        self.assertEqual(voted["vote"]["changed"][0]["to"], 0.5)
+
+    def test_minority_high_score_keeps_deduction(self):
+        # 只有一次说达标 中位数仍是 0 不能把偶发高分当真相
+        rounds = len(q._vote_temperatures())
+        self._mock_scores([0.5] + [0.0] * (rounds - 1))
+        self.assertIsNone(
+            q.vote_deducted_items("http://example/video.mp4", _items(), self._result(0.0), "测试项目")
+        )
+
+    def test_one_dissent_does_not_block_full_score(self):
+        # 首轮 0.16 四轮里有三次 0.2 中位数应拉到 0.2 而不是被第一票钉住
+        self._mock_scores([0.2, 0.2, 0.16, 0.2])
+        voted = q.vote_deducted_items(
+            "http://example/video.mp4", _items(), self._result(0.16), "测试项目"
+        )
+        self.assertIsNotNone(voted)
+        self.assertEqual(voted["vote"]["changed"][0]["to"], 0.2)
+
+    def test_vote_ticket_reason_alignment_promotes(self):
+        # 四轮 reason 都写“达标”却都填 0.16 对齐后每票都是满分 不能继续钉在打折值
+        q._judge_items = lambda *a, **kw: [
+            {"number": "①", "score": 0.16, "reason": "右手无名指抵住模型下颌基座，达标", "time": "@00:26"}
+        ]
+        voted = q.vote_deducted_items(
+            "http://example/video.mp4", _items(), self._result(0.16), "测试项目"
+        )
+        self.assertIsNotNone(voted)
+        self.assertEqual(voted["vote"]["changed"][0]["to"], 0.5)
+
+    def test_one_failed_round_still_decides(self):
+        # 一轮失败还剩四票 去掉首轮那票凑成奇数 前面几次调用不白花
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("模型超时")
+            return [{"number": "①", "score": 0.5, "reason": "达标", "time": "@00:26"}]
+
+        q._judge_items = flaky
+        voted = q.vote_deducted_items("http://example/video.mp4", _items(), self._result(0.0), "测试项目")
+        self.assertIsNotNone(voted)
+        self.assertEqual(voted["vote"]["changed"][0]["to"], 0.5)
+
+    def test_too_few_samples_keeps_first_round(self):
+        # 只剩首轮加一次重判 两票取中位就是押宝 维持首轮
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise RuntimeError("模型超时")
+            return [{"number": "①", "score": 0.5, "reason": "达标", "time": "@00:26"}]
+
+        q._judge_items = flaky
+        self.assertIsNone(
+            q.vote_deducted_items("http://example/video.mp4", _items(), self._result(0.0), "测试项目")
+        )
+
+    def test_full_score_without_evidence_is_revoted(self):
+        # 满分项 reason 只写「规范」 没有时刻也没有口述引文 多数重判认为不达标才扣
+        q._judge_items = lambda targets, *a, **kw: [
+            {"number": "①", "score": 0.2, "reason": "@00:26 无名指悬空", "time": "@00:26"}
+        ]
+        result = self._result(0.5)
+        result["items"][0].update({"reason": "规范", "time": "无"})
+        voted = q.vote_deducted_items("http://example/video.mp4", _items(), result, "测试项目")
+        self.assertIsNotNone(voted)
+        self.assertEqual(voted["vote"]["changed"][0]["to"], 0.2)
+
+    def test_full_score_with_failing_reason_is_revoted(self):
+        # 满分但 reason 写「未执行」 即使带了时刻也要重判
+        q._judge_items = lambda targets, *a, **kw: [
+            {"number": "①", "score": 0.0, "reason": "@00:26 无名指悬空", "time": "@00:26"}
+        ]
+        result = self._result(0.5)
+        result["items"][0].update({"reason": "@00:26 无名指未建立支点，未执行", "time": "@00:26"})
+        voted = q.vote_deducted_items("http://example/video.mp4", _items(), result, "测试项目")
+        self.assertIsNotNone(voted)
+        self.assertEqual(voted["vote"]["changed"][0]["to"], 0.0)
+
+    def test_contradictory_votes_are_not_counted(self):
+        # 满分票的结论是否定时不计入 剩下的票不足三票时维持首轮
+        for reason in ("两手分工不符要求", "右手持探针，左手未持口镜，仅稳定模型"):
+            with self.subTest(reason=reason):
+                q._judge_items = lambda targets, *a, **kw: [
+                    {"number": "①", "score": 0.5, "reason": reason, "time": "无"}
+                ]
+                self.assertIsNone(
+                    q.vote_deducted_items("http://example/video.mp4", _items(), self._result(0.0), "测试项目")
+                )
+
+    def test_full_score_with_evidence_is_not_revoted(self):
+        q._judge_items = lambda *a, **kw: self.fail("有据可查的满分项不应重判")
+        result = self._result(0.5)
+        result["items"][0].update({"reason": "口述“无名指支点”", "time": "无"})
+        self.assertIsNone(
+            q.vote_deducted_items("http://example/video.mp4", _items(), result, "测试项目")
+        )
+
+    def test_fallback_items_are_excluded(self):
+        # 兜底项本来就没有可信判定 投票只会把它变成另一个拍脑袋的数
+        q._judge_items = lambda *a, **kw: self.fail("兜底项不应参与投票")
+        result = self._result(0.5)
+        result["items"][0].update({"score": 0.0, "fallback": True})
+        self.assertIsNone(
+            q.vote_deducted_items("http://example/video.mp4", _items(), result, "测试项目")
+        )
+
+
+class ConflictArbitrationTest(unittest.TestCase):
+    """冲突仲裁: 检出各项对同一事实的相反认定后用同一份证据重判"""
+
+    def setUp(self):
+        self._detect = q._detect_conflicts
+        self._judge = q._judge_items
+        self._call = q._call_model
+
+    def tearDown(self):
+        q._detect_conflicts = self._detect
+        q._judge_items = self._judge
+        q._call_model = self._call
+
+    def _result(self) -> dict:
+        return {
+            "items": [
+                {"number": "①", "point": "支点", "score": 0.0, "full_score": 0.5,
+                 "reason": "全程未见口镜使用", "time": "无"},
+                {"number": "②", "point": "角度", "score": 1.0, "full_score": 1.0,
+                 "reason": "左手持口镜", "time": "@00:21"},
+            ],
+            "summary": "完成度一般",
+        }
+
+    def test_no_conflict_skips_arbitration(self):
+        q._detect_conflicts = lambda *a, **kw: []
+        q._judge_items = lambda *a, **kw: self.fail("无冲突不应发起仲裁")
+        self.assertIsNone(q.arbitrate_conflicts("u", _items(), self._result(), "测试项目"))
+
+    def test_conflict_group_is_rejudged_and_totals_rebuilt(self):
+        q._detect_conflicts = lambda *a, **kw: [
+            {"fact": "左手是否持口镜", "numbers": {"①", "②"}}
+        ]
+        q._judge_items = lambda targets, *a, **kw: [
+            {"number": "①", "score": 0.5, "reason": "左手持口镜牵拉口角，达标", "time": "@00:22"},
+            {"number": "②", "score": 0.8, "reason": "探针角度偏向颊侧", "time": "@00:21"},
+        ]
+        # 两项都是往上走 仲裁只负责救回被判 0 的项 不做降级
+        result = self._result()
+        result["items"][1]["score"] = 0.6
+        voted = q.arbitrate_conflicts("u", _items(), result, "测试项目")
+        self.assertIsNotNone(voted)
+        self.assertEqual(voted["total_score"], 1.3)
+        changes = {c["number"]: c for c in voted["conflicts"]["changed"]}
+        self.assertEqual(changes["①"]["to"], 0.5)
+        self.assertEqual(changes["①"]["fact"], "左手是否持口镜")
+
+    def test_unchanged_verdict_returns_none(self):
+        # 重判后结论本来是自洽的 不能凭空产出一份新结果
+        q._detect_conflicts = lambda *a, **kw: [{"fact": "左手是否持口镜", "numbers": {"①", "②"}}]
+        q._judge_items = lambda targets, *a, **kw: [
+            {"number": "①", "score": 0.0, "reason": "确实未见", "time": "无"},
+            {"number": "②", "score": 1.0, "reason": "左手持口镜", "time": "@00:21"},
+        ]
+        self.assertIsNone(q.arbitrate_conflicts("u", _items(), self._result(), "测试项目"))
+
+    def test_raise_with_failing_reason_is_rejected(self):
+        q._detect_conflicts = lambda *a, **kw: [{"fact": "左手是否持口镜", "numbers": {"①", "②"}}]
+        q._judge_items = lambda targets, *a, **kw: [
+            {"number": "①", "score": 0.5, "reason": "口镜未被拿起，不符要求", "time": "无"},
+            {"number": "②", "score": 1.0, "reason": "左手持口镜", "time": "@00:21"},
+        ]
+        self.assertIsNone(q.arbitrate_conflicts("u", _items(), self._result(), "测试项目"))
+
+    def test_arbitration_failure_keeps_result(self):
+        q._detect_conflicts = lambda *a, **kw: [{"fact": "左手是否持口镜", "numbers": {"①", "②"}}]
+
+        def boom(*a, **kw):
+            raise RuntimeError("模型超时")
+
+        q._judge_items = boom
+        self.assertIsNone(q.arbitrate_conflicts("u", _items(), self._result(), "测试项目"))
+
+    def test_arbitration_never_downgrades_a_scored_item(self):
+        # 补证用窗口密帧认出左手持口镜给到 0.8 仲裁拿首轮稀疏关键帧重判不能压回 0
+        q._detect_conflicts = lambda *a, **kw: [{"fact": "左手是否持口镜", "numbers": {"①", "②"}}]
+        q._judge_items = lambda targets, *a, **kw: [
+            {"number": "①", "score": 0.5, "reason": "无名指抵住基座，达标", "time": "@00:26"},
+            {"number": "②", "score": 0.0, "reason": "未见口镜", "time": "无"},
+        ]
+        result = self._result()
+        result["items"][1]["score"] = 0.8
+        voted = q.arbitrate_conflicts("u", _items(), result, "测试项目")
+        self.assertIsNotNone(voted)
+        scores = {i["number"]: i["score"] for i in voted["items"]}
+        self.assertEqual(scores["①"], 0.5)
+        self.assertEqual(scores["②"], 0.8)
+        self.assertEqual([c["number"] for c in voted["conflicts"]["changed"]], ["①"])
+
+    def test_detect_normalizes_numbers_caps_groups_and_sends_text_only(self):
+        captured = {}
+
+        def fake(system_prompt, user_content, audit_type, temperature=0.1):
+            captured["content"] = user_content
+            return (
+                '{"conflicts":[{"fact":"左手是否持口镜","numbers":["1","(2)"]},'
+                '{"fact":"第二组","numbers":["1","2"]},'
+                '{"fact":"第三组","numbers":["1","2"]}]}'
+            )
+
+        q._call_model = fake
+        result = self._result()
+        result["items"].append(
+            {"number": "③", "point": "兜底项", "score": 0.2, "full_score": 0.2,
+             "reason": "未返回", "fallback": True, "time": "无"}
+        )
+        groups = q._detect_conflicts(result, "测试项目")
+        self.assertEqual(len(groups), q._CONFLICT_MAX_GROUPS)
+        self.assertEqual(groups[0]["numbers"], {"①", "②"})
+        # 检测只喂文本 不重送视频与关键帧 兜底项本来就没有可信判定不参与比对
+        content = captured["content"]
+        self.assertEqual([part["type"] for part in content], ["text"])
+        self.assertNotIn("兜底项", content[0]["text"])
 
 
 class ReferenceImageTest(unittest.TestCase):
@@ -349,6 +763,26 @@ class SupplementFrameTest(unittest.TestCase):
         self.assertIn("video_url", kinds)
         self.assertNotIn("image_url", kinds)
 
+    def test_blind_rescore_hides_previous_score(self):
+        captured = {}
+
+        def fake_call(system_prompt, content, audit_type):
+            captured["text"] = system_prompt + content[0]["text"]
+            return '{"items":[]}'
+
+        q._call_model = fake_call
+        q.rescore_with_clips(
+            "探诊检查",
+            [{"number": "4", "point": "左手持口镜", "full_score": 0.15, "score": 0.0,
+              "reason": "全程未见口镜", "weight": "视觉100%"}],
+            [{"label": " 00:17-00:30", "url": "http://example/clip.mp4", "transcript": ""}],
+            blind=True,
+        )
+        self.assertNotIn("上一轮0", captured["text"])
+        self.assertNotIn("全程未见口镜", captured["text"])
+        # 权重决定口述满分档是否成立 复核时必须带上
+        self.assertIn("口述视觉权重：视觉100%", captured["text"])
+
 
 class ShrinkImageTest(unittest.TestCase):
     """参考图压缩: 阈值内原样透传 超长边才缩小 同时修正 EXIF 方向"""
@@ -469,6 +903,73 @@ class PromptPolicyTest(unittest.TestCase):
     def test_summary_limit_is_consistent(self):
         self.assertIn(f"不超过 {q._SUMMARY_MAX_CHARS} 字", q._SCORING_POLICY)
         self.assertIn(f"不超过 {q._SUMMARY_MAX_CHARS} 字", q._RUBRIC_OUTPUT_FORMAT)
+
+    def test_weight_is_optional_and_blank_means_full_score(self):
+        # 权重未填时不得折算份额 符合评分标准就给满分
+        self.assertIn("口述视觉权重是选填项", q._SCORING_POLICY)
+        self.assertIn("就给该项满分", q._SCORING_POLICY)
+
+    def test_policy_carries_no_default_weight_ratio(self):
+        # 提示词里写死比例会被模型当默认值套到未填权重的项上
+        for literal in ("视觉占八成", "口述占两成", "口述20", "视觉80"):
+            self.assertNotIn(literal, q._SCORING_POLICY)
+
+    def test_filled_weight_overrides_oral_full_mark_tier(self):
+        # 「视觉100%」的项不能再被「口述完整即满分」那一档命中 否则两条规则对同一项给出相反结论
+        self.assertIn("优先于第 2 条第 1 档", q._SCORING_POLICY)
+        self.assertIn("未填口述视觉权重或权重全部归口述", q._SCORING_POLICY)
+        self.assertIn("第 1 档的前提成立", q._EVIDENCE_NOTE)
+
+    def test_asr_failure_is_not_silence(self):
+        self.assertIn("语音转写失败", q._EVIDENCE_NOTE)
+        self.assertIn("语音转写失败", q._SUPPLEMENT_POLICY)
+
+    def test_item_rules_only_injected_when_mentioned(self):
+        # 心肺复苏不该读到口镜与牙科镊的区别
+        self.assertEqual(q._scoring_policy("① 胸外按压深度 5~6cm"), q._SCORING_POLICY)
+        picked = q._scoring_policy("① 无名指支点稳定")
+        self.assertIn("支点的认定", picked)
+        self.assertNotIn("口镜与牙科镊的区别", picked)
+
+    def test_conflict_policy_flags_same_hand_contradiction(self):
+        self.assertIn("左手未持口镜", q._CONFLICT_POLICY)
+        self.assertIn("两项评分点不同并不影响", q._CONFLICT_POLICY)
+
+
+class TrimReasoningQuoteTest(unittest.TestCase):
+    def test_quoted_question_is_kept(self):
+        # 引号里的问句是考生原话 在那里截断会把后半句的结论一起丢掉
+        reason = "口述“有没有不舒服？”，@00:12 探针轻触龈沟，达标"
+        self.assertEqual(q._trim_reasoning(reason), reason)
+
+    def test_bare_question_still_cuts(self):
+        self.assertEqual(q._trim_reasoning("支点可见，应给满分吗？不确定"), "支点可见")
+
+
+class ThinkingSwitchTest(unittest.TestCase):
+    def setUp(self):
+        self._client = q._client
+
+    def tearDown(self):
+        q._client = self._client
+
+    def test_thinking_off_sends_no_extra_body(self):
+        captured = {}
+
+        class _Completions:
+            def create(self, **kwargs):
+                captured.update(kwargs)
+                msg = type("M", (), {"content": "{}"})
+                return type("R", (), {"choices": [type("C", (), {"message": msg})]})
+
+        q._client = type("Client", (), {"chat": type("Chat", (), {"completions": _Completions()})})
+        original = q.settings.QWEN_ENABLE_THINKING
+        q.settings.QWEN_ENABLE_THINKING = False
+        try:
+            q._call_model("sys", [{"type": "text", "text": "u"}], "测试项目")
+        finally:
+            q.settings.QWEN_ENABLE_THINKING = original
+        self.assertNotIn("extra_body", captured)
 
 
 if __name__ == "__main__":

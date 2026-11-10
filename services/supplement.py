@@ -207,11 +207,11 @@ def _merge_frames(base: list, extra: list, gap: float = 0.5) -> list:
 
 
 def _transcript_text(evidence: VideoEvidence, start: float, end: float) -> str:
-    """取片段窗口范围内的语音转写 无重叠切片时返回空串"""
+    """取片段窗口范围内的语音转写 无重叠切片时返回空串 转写失败的切片照样标出"""
     parts = [
-        f"[{s.label}] {s.transcript}"
+        f"[{s.label}] {s.transcript_line}"
         for s in evidence.slices
-        if s.transcript and s.end > start and s.start < end
+        if (s.transcript or s.asr_failed) and s.end > start and s.start < end
     ]
     return " ".join(parts)
 
@@ -234,47 +234,55 @@ def _recalc_totals(result: dict) -> None:
 
 def _apply_updates(result: dict, updates: list[dict], clips: list[dict],
                    skipped: list[dict]) -> dict:
-    """合并复核结果: 只有 clear=true 才改动分数 其余保持原分并留痕"""
+    """合并复核结果: 只有 clear=true 才改动分数 其余保持原分并留痕
+
+    同一项可能被复核两轮（先成组问、仍判 0 再单问） 后一轮覆盖前一轮
+    """
     by_number = {item["number"]: item for item in result.get("items", [])}
-    changes = []
-    rechecked = 0
+    changes: dict[str, dict] = {}
+    checked: set[str] = set()
     for update in updates:
         item = by_number.get(update["number"])
         if item is None:
             continue
-        rechecked += 1
+        checked.add(update["number"])
+        # from 始终记复核前的原始分 否则第二轮会把第一轮刚抬上去的分当成起点
+        base = changes[update["number"]]["from"] if update["number"] in changes else float(item["score"])
         if not update["clear"]:
-            item["recheck"] = "二次复核仍证据不足，保持原分"
+            # 已经在前一轮改过分的 不因后一轮说「仍看不清」而退回未修正的措辞
+            if update["number"] not in changes:
+                item["recheck"] = "二次复核仍证据不足，保持原分"
             continue
         if abs(update["score"] - float(item["score"])) < 0.01:
             item["recheck"] = "二次复核确认，分数不变"
             continue
 
-        changes.append({
+        changes[update["number"]] = {
             "number": update["number"],
             "point": item["point"],
-            "from": float(item["score"]),
+            "from": base,
             "to": update["score"],
             "reason": update["reason"] or item.get("reason", ""),
-        })
+        }
         item["score"] = update["score"]
         if update["reason"]:
             item["reason"] = update["reason"]
         item["recheck"] = "二次补证修正"
 
     _recalc_totals(result)
+    change_list = list(changes.values())
     result["supplement"] = {
         "clips": [clip["label"].strip() for clip in clips],
-        "rechecked": rechecked,
-        "changed": len(changes),
+        "rechecked": len(checked),
+        "changed": len(change_list),
         "unlocated": [item["number"] for item in skipped],
-        "changes": changes,
+        "changes": change_list,
     }
     return {
-        "rechecked": rechecked,
-        "changed": len(changes),
+        "rechecked": len(checked),
+        "changed": len(change_list),
         "clips": len(clips),
-        "changes": changes,
+        "changes": change_list,
     }
 
 
@@ -308,6 +316,9 @@ def supplement_rescore(
             "point": item["point"],
             "evidence": rubric.evidence if rubric else "",
             "remark": rubric.remark if rubric else "",
+            # 评分尺度第 2 条第 1 档是否成立取决于权重 复核时不带权重 模型就只能猜
+            "weight": getattr(rubric, "oral_visual_weight", "") if rubric else "",
+            "keywords": getattr(rubric, "oral_keywords", "") if rubric else "",
             "full_score": float(item["full_score"]),
             "score": float(item["score"]),
             "reason": item.get("reason", ""),
@@ -372,15 +383,21 @@ def supplement_rescore(
 
         updates: list[dict] = []
         for clip in clips:
-            if clip.get("dense"):
-                # 判 0 分的项逐个单问: 多项同批判定时模型对单项只扫一眼
-                # 实测同一帧单问能认出支点 混在几项里就写成「未见支点」
-                for item in clip["items"]:
-                    updates.extend(
-                        rescore_with_clips(audit_type, [item], [clip], blind=True)
-                    )
-            else:
+            if not clip.get("dense"):
                 updates.extend(rescore_with_clips(audit_type, clip["items"], [clip]))
+                continue
+            # 判 0 分的项先成组问: 左手是否持口镜、探针用的是哪一端 这类事实被多个评分项共用
+            # 拆开后各项各自为政 实测同一段证据第 4 项认出左手持口镜 第 2 项却写全程未见
+            group = rescore_with_clips(audit_type, clip["items"], [clip], blind=True)
+            updates.extend(group)
+            got = {u["number"]: u for u in group}
+            # 成组问后仍贴 0 的再单问一次: 多项同批时模型对单项只扫一眼 支点这类细节靠单问才看得清
+            # 已经救回来的不花钱 成本从「0 分项数」次变成 1 次 + 仍为 0 的项数
+            for item in clip["items"]:
+                rest = got.get(item["number"])
+                if rest is not None and float(rest["score"]) > 0.01:
+                    continue
+                updates.extend(rescore_with_clips(audit_type, [item], [clip], blind=True))
         if not updates:
             logger.warning("二次补证: 模型未返回有效复核结果")
             return None

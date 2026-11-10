@@ -15,7 +15,13 @@ from db.db import (
     save_audit_result,
     update_task_status,
 )
-from services.qwen_client import score_video, score_video_with_rubric
+from services.qwen_client import (
+    arbitrate_conflicts,
+    score_video,
+    score_video_with_rubric,
+    vote_deducted_items,
+)
+from services.asr_client import build_asr_context
 from services.media_evidence import prepare_evidence
 from services.supplement import supplement_rescore
 from utils.audit_type import AuditType
@@ -172,8 +178,18 @@ async def _process_audit_task(task_id: int) -> None:
             evidence = None
             if settings.AUDIT_MEDIA_ENABLED:
                 media_start = time.time()
+                # 评分点与口述关键词作为语音识别上下文 探针、龈沟这类术语不再被转成同音错字
+                asr_context = build_asr_context(
+                    task.audit_type,
+                    [
+                        f"{item.point} {getattr(item, 'oral_keywords', '') or ''}"
+                        for item in rubric_items
+                    ] if rubric_items else [rule_text or ""],
+                )
                 try:
-                    media_task = await asyncio.to_thread(prepare_evidence, video_url)
+                    media_task = await asyncio.to_thread(
+                        prepare_evidence, video_url, asr_context=asr_context
+                    )
                     evidence = media_task
                     logger.info(
                         "[Worker]   切片抽帧+语音转写完成: %s (耗时 %.1fs)",
@@ -243,6 +259,40 @@ async def _process_audit_task(task_id: int) -> None:
                         rated_items,
                     )
 
+            # 5.4 扣分项投票：同一份证据换温度重判两次 逐项取中位数
+            #     单次判定会把「无名指搭在模型下颌」看成「无名指悬空」 满分项不花调用
+            if settings.MEDIA_VOTE_ENABLED and rubric_items and evidence is not None:
+                vote_start = time.time()
+                try:
+                    voted = await asyncio.to_thread(
+                        vote_deducted_items,
+                        video_url,
+                        rubric_items,
+                        result,
+                        task.audit_type,
+                        evidence,
+                    )
+                    if voted is None:
+                        logger.info(
+                            "[Worker]   扣分项投票: 无扣分项或结论未变 (耗时 %.1fs)",
+                            time.time() - vote_start,
+                        )
+                    else:
+                        result = voted
+                        logger.info(
+                            "[Worker]   扣分项投票: 参与%d项 调整%d项 (耗时 %.1fs)",
+                            voted["vote"]["items"],
+                            len(voted["vote"]["changed"]),
+                            time.time() - vote_start,
+                        )
+                        for change in voted["vote"]["changed"]:
+                            logger.info(
+                                "[Worker]   ~ %s: %s → %s",
+                                change["point"], change["from"], change["to"],
+                            )
+                except Exception as exc:
+                    logger.warning("[Worker]   扣分项投票失败 沿用首轮结果: %s", exc)
+
             # 5.5 二次补证：对证据受限的评分项切连续片段复核 失败不阻断
             if settings.MEDIA_SUPPLEMENT_ENABLED and rubric_items and evidence is not None:
                 supplement_start = time.time()
@@ -272,10 +322,45 @@ async def _process_audit_task(task_id: int) -> None:
                 except Exception as exc:
                     logger.warning("[Worker]   二次补证失败 沿用第一轮结果: %s", exc)
 
+            # 5.6 冲突仲裁：各项判定对同一事实给出相反结论时拿同一份证据重判这几项
+            #     实测补证把第 4 项改成「左手持口镜」后 第 2 项仍带着「全程未见口镜」一起入库
+            #     检测只走纯文本 只在真检出冲突时才花带证据的那一次调用
+            #     无证据时不跑: 重判会退化成整段视频输入 采样不受控 不如维持原判定
+            if settings.MEDIA_CONFLICT_ENABLED and rubric_items and evidence is not None:
+                conflict_start = time.time()
+                try:
+                    arbitrated = await asyncio.to_thread(
+                        arbitrate_conflicts,
+                        video_url,
+                        rubric_items,
+                        result,
+                        task.audit_type,
+                        evidence,
+                    )
+                    if arbitrated is None:
+                        logger.info(
+                            "[Worker]   冲突仲裁: 无矛盾或重判后自洽 (耗时 %.1fs)",
+                            time.time() - conflict_start,
+                        )
+                    else:
+                        result = arbitrated
+                        logger.info(
+                            "[Worker]   冲突仲裁: 检出%d组 调整%d项 (耗时 %.1fs)",
+                            arbitrated["conflicts"]["groups"],
+                            len(arbitrated["conflicts"]["changed"]),
+                            time.time() - conflict_start,
+                        )
+                        for change in arbitrated["conflicts"]["changed"]:
+                            logger.info(
+                                "[Worker]   ~ %s: %s → %s (%s)",
+                                change["point"], change["from"], change["to"], change["fact"],
+                            )
+                except Exception as exc:
+                    logger.warning("[Worker]   冲突仲裁失败 沿用原结果: %s", exc)
+
             total_score = result.get("total_score", 0)
             full_score = result.get("full_score", 0)
             deductions = result.get("deductions", [])
-
             # 服务端校验：total_score 必须 = full_score - sum(deduct_score)
             total_deduct = sum(float(d.get("deduct_score", 0) or 0) for d in deductions)
             expected_score = float(full_score or 0) - total_deduct

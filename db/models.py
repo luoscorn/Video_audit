@@ -80,7 +80,7 @@ class ScoreRuleItem(Base):
     number = Column(String(16), nullable=False, comment="评分项编号")
     point = Column(String(255), nullable=False, comment="细分评分点")
     evidence = Column(String(500), comment="视频识别依据")
-    oral_visual_weight = Column(String(64), comment="口述视觉权重 例 口述20 视觉80 写入打分提示词")
+    oral_visual_weight = Column(String(64), comment="口述视觉权重 可留空 留空则符合评分标准即给满分 填写后写入打分提示词")
     oral_keywords = Column(Text, comment="口述关键词 写入打分提示词")
     remark = Column(Text, comment="备注 写入打分提示词作为该项补充判定说明")
     image_refs = Column(Text, comment="操作图片 每行一个 OSS key 或 http 直链 作为规范参考图送模型")

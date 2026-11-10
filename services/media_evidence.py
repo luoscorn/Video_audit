@@ -14,11 +14,13 @@
 
 import base64
 import logging
+import math
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
@@ -46,11 +48,21 @@ _CANDIDATE_FPS = 2.0         # 候选帧采样频率上限
 _CANDIDATE_MAX_FRAMES = 600  # 候选帧总量上限 超出则自动降低采样频率
 _CANDIDATE_MIN_RANGE = 12    # 像素极差低于该值视为黑场/纯色过渡帧 直接丢弃
 _SPREAD_WEIGHT = 0.35        # 选帧打分中「时间分散」的权重 相机固定时靠它保证覆盖
+# 画面差异用「相邻像素明暗关系」的差值哈希衡量 不直接比原始字节
+# 原始字节按位异或: 亮度 127→128 只差 1 却算 8 位不同 0→128 差 128 只算 1 位 选帧被噪声带着走
+_HASH_POOL = 2               # 先按 2x2 取均值压噪 再比较相邻像素
+_HASH_MARGIN = 2             # 明暗差不超过该值视为平坦 编码不随压缩噪声翻转
 
 # 音频参数 单声道 16k 32kbps 兼顾体积与识别率
 _AUDIO_RATE = "16000"
 _AUDIO_BITRATE = "32k"
-_MAX_SLICE_AUDIO_SECONDS = 120  # 单片音频上限 避免单次转写超限
+_MAX_SLICE_AUDIO_SECONDS = 120  # 单次转写的音频上限 超长切片拆成子段分别转写 不再截掉尾部
+_AUDIO_OVERLAP = 1.0            # 音频前后各多留的秒数 跨边界的一句话不会被拆成两半各自转写
+_ASR_ATTEMPTS = 2               # 单段转写尝试次数 限流与网络抖动重试一次通常就能过
+_ASR_RETRY_DELAY = 1.5
+# 转写失败与「没说话」必须分开写 否则模型会把失败当成考生未口述而扣分 措辞与 _EVIDENCE_NOTE 保持一致
+ASR_FAILED_MARK = "（语音转写失败，不代表考生没说话）"
+ASR_PARTIAL_MARK = "（本段部分语音转写失败）"
 
 # 二次补证片段参数 重编码为小体积 mp4 直传模型
 _CLIP_MAX_WIDTH = 720
@@ -91,6 +103,14 @@ class VideoSlice:
     end: float
     frames: list[Frame] = field(default_factory=list)
     transcript: str = ""
+    asr_failed: bool = False   # 该片至少一段音频转写失败 空转写不等于没说话
+
+    @property
+    def transcript_line(self) -> str:
+        """写进提示词的语音内容 转写失败时明确标出 不与「无语音」混用"""
+        if not self.asr_failed:
+            return self.transcript or "（该片段无语音内容）"
+        return f"{self.transcript}{ASR_PARTIAL_MARK}" if self.transcript else ASR_FAILED_MARK
 
     @property
     def label(self) -> str:
@@ -178,9 +198,11 @@ class VideoEvidence:
 
     def describe(self) -> str:
         """一行日志描述"""
+        failed = sum(1 for s in self.slices if s.asr_failed)
         return (
             f"时长 {self.duration:.0f}s, 切片 {len(self.slices)} 段, "
             f"关键帧 {self.frame_count} 张, 语音转写 {self.spoken_slices} 段"
+            + (f"（转写失败 {failed} 段）" if failed else "")
             + ("（视频无音轨）" if not self.has_audio else "")
         )
 
@@ -194,7 +216,7 @@ class VideoEvidence:
             marks = "、".join(f.label for f in s.frames) or "（本段无关键帧）"
             lines.append(f"\n【片段{s.index + 1}】{s.label}")
             lines.append(f"关键帧时刻：{marks}")
-            lines.append(f"语音转写：{s.transcript or '（该片段无语音内容）'}")
+            lines.append(f"语音转写：{s.transcript_line}")
         return "\n".join(lines)
 
     def transcript_text(self) -> str:
@@ -361,12 +383,45 @@ def _gap_fill_index(selected: list[int], times: list[float], max_gap: float) -> 
     return -1
 
 
+def _dhash(chunk: bytes, width: int = _CANDIDATE_WIDTH, height: int = _CANDIDATE_HEIGHT) -> int:
+    """差值哈希: 先 2x2 均值压噪 再编码每对水平相邻像素的明暗关系
+
+    每对占两位: 左亮于右 / 右亮于左 差值不超过 _HASH_MARGIN 时两位都为 0
+    整体明暗变化不改变编码 画面结构（器械、手的位置）变了才会翻位
+    尺寸与候选帧不符时按单行处理 不做池化
+    """
+    if width * height != len(chunk):
+        rows = [list(chunk)]
+    else:
+        pool = _HASH_POOL
+        rows = []
+        for y in range(0, height - pool + 1, pool):
+            row = []
+            for x in range(0, width - pool + 1, pool):
+                total = sum(chunk[(y + dy) * width + x + dx] for dy in range(pool) for dx in range(pool))
+                row.append(total / (pool * pool))
+            rows.append(row)
+    value = 0
+    for row in rows:
+        for left, right in zip(row, row[1:]):
+            value = (value << 2) | ((left - right > _HASH_MARGIN) << 1) | (right - left > _HASH_MARGIN)
+    return value
+
+
+def _hash_bits(chunk: bytes, width: int = _CANDIDATE_WIDTH, height: int = _CANDIDATE_HEIGHT) -> int:
+    """_dhash 的编码位数 用于把汉明距离归一化"""
+    if width * height != len(chunk):
+        return max(2, 2 * (len(chunk) - 1))
+    cols, rows = width // _HASH_POOL, height // _HASH_POOL
+    return max(2, 2 * (cols - 1) * rows)
+
+
 def _select_timestamps(candidates: list[tuple[float, bytes]], count: int) -> list[float]:
     """
     从候选帧里挑出 count 个时刻: 优先画面差异大的帧 同时保证时间分散
 
     先补最大时间空档（不超过 span/count 的 1.5 倍） 再逐次选「与已选帧最小差异最大」的帧
-    差异用像素字节的汉明距离衡量 差异接近时由时间间隔决定
+    差异用差值哈希的汉明距离衡量 差异接近时由时间间隔决定
 
     :return: 按时间升序排列的时刻
     """
@@ -375,9 +430,9 @@ def _select_timestamps(candidates: list[tuple[float, bytes]], count: int) -> lis
     if len(candidates) <= count:
         return [t for t, _ in candidates]
 
-    pixels = [int.from_bytes(chunk, "big") for _, chunk in candidates]
+    pixels = [_dhash(chunk) for _, chunk in candidates]
     times = [t for t, _ in candidates]
-    total_bits = len(candidates[0][1]) * 8
+    total_bits = _hash_bits(candidates[0][1])
     span = max(1e-6, times[-1] - times[0])
     max_gap = span / count * 1.5
 
@@ -513,41 +568,85 @@ def cut_clip(video_path: str, start: float, end: float, save_dir: str,
     return out_path if os.path.exists(out_path) and os.path.getsize(out_path) > 0 else None
 
 
-def _cut_audio(video_path: str, slice_item: VideoSlice, save_dir: str) -> Optional[str]:
-    """切出切片对应的音频 转 mp3 单声道 16k"""
-    length = min(slice_item.duration, _MAX_SLICE_AUDIO_SECONDS)
-    out_path = os.path.join(save_dir, f"slice{slice_item.index}.mp3")
+def _audio_windows(start: float, end: float, duration: float) -> list[tuple[float, float]]:
+    """切片对应的音频窗口: 前后各放宽 _AUDIO_OVERLAP 秒 超过单次转写上限时等分成若干子段
+
+    子段之间同样互相重叠 每段长度不超过 _MAX_SLICE_AUDIO_SECONDS
+    """
+    low = max(0.0, start - _AUDIO_OVERLAP)
+    high = min(duration, end + _AUDIO_OVERLAP) if duration > 0 else end + _AUDIO_OVERLAP
+    span = high - low
+    if span <= 0:
+        return []
+    usable = max(1.0, _MAX_SLICE_AUDIO_SECONDS - 2 * _AUDIO_OVERLAP)
+    count = max(1, math.ceil(span / usable))
+    if count == 1:
+        return [(round(low, 2), round(high, 2))]
+    step = span / count
+    return [
+        (round(max(low, low + i * step - _AUDIO_OVERLAP), 2),
+         round(min(high, low + (i + 1) * step + _AUDIO_OVERLAP), 2))
+        for i in range(count)
+    ]
+
+
+def _cut_audio(video_path: str, start: float, end: float, out_path: str) -> Optional[str]:
+    """切出一段音频 转 mp3 单声道 16k"""
     try:
         _run_ffmpeg([
-            "-ss", f"{slice_item.start:.2f}",
-            "-t", f"{length:.2f}",
+            "-ss", f"{start:.2f}",
+            "-t", f"{max(0.1, end - start):.2f}",
             "-i", video_path,
             "-vn", "-ac", "1", "-ar", _AUDIO_RATE, "-b:a", _AUDIO_BITRATE,
             "-y", out_path,
         ])
     except Exception as exc:
-        logger.warning("切片 %d 音频抽取失败: %s", slice_item.index, exc)
+        logger.warning("音频抽取失败 %.1f-%.1fs: %s", start, end, exc)
         return None
     return out_path if os.path.exists(out_path) and os.path.getsize(out_path) > 0 else None
 
 
-def _safe_transcribe(audio_path: Optional[str]) -> str:
-    """转写单个切片音频 失败返回空串不阻断整体流程"""
+def _safe_transcribe(audio_path: Optional[str], context: str = "") -> Optional[str]:
+    """转写单段音频 失败重试一次
+
+    :return: 转写文本 转写失败返回 None 与「无语音」的空串区分开
+    """
     if audio_path is None:
-        return ""
-    try:
-        return transcribe_audio_file(audio_path).strip()
-    except Exception as exc:
-        logger.warning("切片音频转写失败 %s: %s", audio_path, exc)
-        return ""
+        return None
+    for attempt in range(1, _ASR_ATTEMPTS + 1):
+        try:
+            return transcribe_audio_file(audio_path, context=context).strip()
+        except Exception as exc:
+            logger.warning("音频转写失败(第%d/%d次) %s: %s", attempt, _ASR_ATTEMPTS, audio_path, exc)
+            if attempt < _ASR_ATTEMPTS:
+                time.sleep(_ASR_RETRY_DELAY)
+    return None
 
 
-def prepare_evidence(video_url: str, max_slices: int = _MAX_SLICES) -> VideoEvidence:
+def _transcribe_slice(video_path: str, slice_item: VideoSlice, duration: float,
+                      save_dir: str, context: str = "") -> tuple[str, bool]:
+    """转写一个切片: 放宽边界、超长拆段后逐段转写再拼接
+
+    :return: (转写文本, 是否有子段转写失败)
+    """
+    texts, failed = [], False
+    for part, (start, end) in enumerate(_audio_windows(slice_item.start, slice_item.end, duration)):
+        out_path = os.path.join(save_dir, f"slice{slice_item.index}_{part}.mp3")
+        text = _safe_transcribe(_cut_audio(video_path, start, end, out_path), context)
+        if text is None:
+            failed = True
+        elif text:
+            texts.append(text)
+    return " ".join(texts), failed
+
+
+def prepare_evidence(video_url: str, max_slices: int = _MAX_SLICES, asr_context: str = "") -> VideoEvidence:
     """
     下载视频并抽取打分证据: 切片关键帧 + 逐片语音转写
 
     :param video_url: 视频预签名下载 URL
     :param max_slices: 最多切片数
+    :param asr_context: 语音识别的领域上下文 见 asr_client.build_asr_context
     :return: VideoEvidence
     :raises RuntimeError: 下载/解码失败等无法产出证据的情况 由调用方回退
     """
@@ -569,14 +668,17 @@ def prepare_evidence(video_url: str, max_slices: int = _MAX_SLICES) -> VideoEvid
             if owner is not None:
                 owner.frames.append(frame)
 
-        # 语音: 逐片切音频后并发转写
+        # 语音: 逐片切音频并发转写 转写失败的片单独标记 不当作「没说话」
         spoken = 0
         if has_audio:
-            audio_paths = [_cut_audio(video_path, s, work_dir) for s in slices]
             with ThreadPoolExecutor(max_workers=min(_ASR_WORKERS, len(slices))) as pool:
-                transcripts = list(pool.map(_safe_transcribe, audio_paths))
-            for slice_item, text in zip(slices, transcripts):
+                outcomes = list(pool.map(
+                    lambda s: _transcribe_slice(video_path, s, duration, work_dir, asr_context),
+                    slices,
+                ))
+            for slice_item, (text, failed) in zip(slices, outcomes):
                 slice_item.transcript = text
+                slice_item.asr_failed = failed
                 spoken += 1 if text else 0
 
         evidence = VideoEvidence(
