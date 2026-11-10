@@ -17,6 +17,7 @@ from db.db import (
 )
 from services.qwen_client import (
     arbitrate_conflicts,
+    demote_contradicted_full_marks,
     rewrite_summary,
     score_video,
     score_video_with_rubric,
@@ -294,6 +295,20 @@ async def _process_audit_task(task_id: int) -> None:
                 except Exception as exc:
                     logger.warning("[Worker]   扣分项投票失败 沿用首轮结果: %s", exc)
 
+            # 5.45 分数与理由对齐：各环节都只往上改分 没人看分数与理由是否一致
+            #      实测 144 第 4 项被投票抬到满分 而理由写的是「未见考生左手持该器械」
+            #      归零后交给下面两步复核 真做了会在那里被看到并升回满分
+            if rubric_items:
+                try:
+                    aligned = demote_contradicted_full_marks(result)
+                    for change in aligned:
+                        logger.info(
+                            "[Worker]   ~ %s: %s → %s（理由写明未做到）",
+                            change["point"], change["from"], change["to"],
+                        )
+                except Exception as exc:
+                    logger.warning("[Worker]   分数与理由对齐失败 沿用原结果: %s", exc)
+
             # 5.5 二次补证：对证据受限的评分项切连续片段复核 失败不阻断
             if settings.MEDIA_SUPPLEMENT_ENABLED and rubric_items and evidence is not None:
                 supplement_start = time.time()
@@ -390,7 +405,7 @@ async def _process_audit_task(task_id: int) -> None:
 
             # 5.7 摘要按最终明细重写：首轮摘要与后来改过的分数会互相矛盾
             #     实测第 2、4 项已给满分 摘要却写「未使用口镜牵拉、左手未持口镜」
-            if any(result.get(key) for key in ("vote", "supplement", "pose_probe", "conflicts")):
+            if any(result.get(key) for key in ("vote", "supplement", "pose_probe", "conflicts", "aligned")):
                 try:
                     rewritten = await asyncio.to_thread(rewrite_summary, task.audit_type, result)
                     if rewritten:

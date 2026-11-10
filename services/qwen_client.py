@@ -256,6 +256,16 @@ def _strip_unpaired_brackets(text: str) -> str:
     return "".join(ch for idx, ch in enumerate(text) if idx not in drop)
 
 
+def _verdict_text(reason: str) -> str:
+    """判定用的 reason: 去推理过程但保留全文
+
+    展示用的 _REASON_MAX_CHARS 截断会把句尾的结论切掉
+    实测 144 补证理由共 120 多字 「不符合…要求」的「要求」刚好落在截断点之后
+    截断前先判一次 否则文字只剩半句 关键词就丢了
+    """
+    return _trim_reasoning(reason or "").strip()
+
+
 def _clean_reason(reason: str) -> str:
     """去掉 reason 中的分数换算与推理过程 只保留判定依据"""
     if not reason:
@@ -288,18 +298,22 @@ _REASON_FULL_MARK_RE = re.compile(
 _REASON_DONE_TAIL_RE = re.compile(r"(?:达标|达成|满足|符合要求|通过|满分)[。．.!！\s]*$")
 # 带有否定或限定词时不做上修 否则“合计达标但支点不稳”“部分牙位达标”会被抬成满分
 _REASON_FAIL_MARK_RE = re.compile(
-    r"未达|不达标|未满足|未执行|未完成|未能|未做到|缺失|未见|无任何|不符合|不规范|不到位|不稳|不足"
+    r"未达|不达标|未满足|未执行|未完成|未能|未做到|缺失|未见|无任何|"
+    r"不符(?:合)?[^。；;]{0,24}(?:要求|标准|规范)|不规范|不到位|不稳|不足"
 )
 _REASON_HEDGE_RE = re.compile(r"部分|基本|大体|个别|局部|仅|但|不过|尚未")
 
 
 # 反方向的错配: 分数填了满分 reason 的结论却是没做到
 # 实测补证原句: “口镜仍在托盘内未被拿起；两手未各持口镜与探针，分工不符要求” 同一条却 clear=true、满分
+# 实测 144 第 4 项: “全程未见考生左手持该器械” 却被投票抬到满分
+# 实测补证原句: “不符合‘左手持口镜、右手持探针’要求” 中间夹引号内容 不能只认紧贴的措辞
 # 只认结论性措辞: 「未见戳刺牙龈」这类正面描述里的否定词不算
 # 「无法确认」也不算: 口述完整时第 1 档允许画面无法确认仍给满分
 _REASON_VERDICT_FAIL_RE = re.compile(
-    r"不符(?:合)?(?:要求|标准|规范)|未达标|不达标|未满足|未执行|不得分|"
+    r"不符(?:合)?[^。；;]{0,24}(?:要求|标准|规范)|未达标|不达标|未满足|未执行|不得分|"
     r"两手未各持|未见[^。；;]{0,50}分工(?:状态|要求)?|"
+    r"未见[^。；;]{0,40}(?:持|使用|拿起|拿出|各持)|"
     r"(?:左手|右手)未持(?:口镜|任何器械)|未抵(?:住|于|在)?"
 )
 
@@ -764,9 +778,12 @@ def _assemble_result(
 
         # 越界分数按该项分值区间截断 防止 AI 给出负分或超满分
         score = round(max(0.0, min(float(rubric.score), score)), 2)
-        reason = _clean_reason(str(raw_item.get("reason", "")).strip())
+        raw_reason = str(raw_item.get("reason", "")).strip()
+        reason = _clean_reason(raw_reason)
         # reason 已经写明各方证据均达成时 分数不能还按份额打折
-        score, promoted = _align_score_with_reason(score, reason, float(rubric.score))
+        # 判定用未截断全文 展示才用截断后的
+        verdict = _verdict_text(raw_reason) or reason
+        score, promoted = _align_score_with_reason(score, verdict, float(rubric.score))
         if promoted:
             logger.info(
                 "评分项 %s reason 已判定达成 分数由 %.2f 提升至 %.2f",
@@ -981,6 +998,61 @@ def probe_pose_item(
         "time": str(data.get(f"{fact}_time", "")).strip(),
         "reason": reason,
     }
+
+
+# 满分却写着没做到的项: 投票逐项取中位数时 可能挑中一票「满分 + 理由否定」的自相矛盾票
+# 实测 144 第 4 项就是这样进的库: 0.15 满分而 reason 写「全程未见考生左手持该器械」
+# 归零而不是降一档: 这类措辞是「没做」而不是「看不清」 看清与否由后续补证与姿态复验去分
+# 这一步排在补证与姿态复验之前 真做了的项会在那里被看到并升回满分
+
+def _recalc_totals(result: dict) -> None:
+    """按各项得分重算扣分项与总分 保证 total = full - sum(deduct)"""
+    deductions = []
+    for item in result.get("items") or []:
+        full = float(item["full_score"])
+        score = float(item["score"])
+        if score < full - 0.01:
+            deductions.append({
+                "item": f"{item['number']} {item['point']}",
+                "deduct_score": round(full - score, 2),
+                "reason": item.get("reason") or "未说明扣分原因",
+            })
+    result["deductions"] = deductions
+    result["total_score"] = round(sum(float(i["score"]) for i in result.get("items") or []), 2)
+
+
+def demote_contradicted_full_marks(result: dict) -> list[dict]:
+    """把「满分但理由写着没做到」的项归零
+
+    链路各环节都只往上改分 没人回头看分数与理由是否一致
+    纯本地重算 不花模型调用
+    :return: [{number, point, from, to, reason}] 无变更返回空列表
+    """
+    changed = []
+    for item in result.get("items") or []:
+        full = float(item.get("full_score") or 0)
+        score = float(item.get("score") or 0)
+        if full <= 0 or score < full - 0.001:
+            continue
+        reason = item.get("reason") or ""
+        if not _contradicts_full_mark(score, reason, full):
+            continue
+        item["score"] = 0.0
+        item["recheck"] = "理由写明未做到，按未达成计分"
+        changed.append({
+            "number": item["number"],
+            "point": item["point"],
+            "from": score,
+            "to": 0.0,
+            "reason": reason,
+        })
+        logger.info(
+            "分数与理由对齐: 评分项 %s 由 %.2f 归零（理由写明未做到）", item["point"], score,
+        )
+    if changed:
+        _recalc_totals(result)
+        result["aligned"] = changed
+    return changed
 
 
 def rewrite_summary(audit_type: str, result: dict) -> str:
@@ -1463,15 +1535,18 @@ def _parse_supplement(raw_text: str, check_items: list[dict]) -> list[dict]:
         except (TypeError, ValueError):
             continue
         full = float(item["full_score"])
-        clean = _clean_reason(str(raw.get("reason", "")).strip())
+        raw_reason = str(raw.get("reason", "")).strip()
+        clean = _clean_reason(raw_reason)
+        # 判定用未截断全文: 截断会把句尾的「不符合…要求」切掉 只看前半句会当成达标
+        verdict = _verdict_text(raw_reason) or clean
         bounded = round(max(0.0, min(full, score)), 2)
         clear = _as_bool(raw.get("clear"))
         # 复核结论说达成时 同样不能让分数停在打折值 只有 clear=false 保留原分时不计
         if clear:
-            bounded, _ = _align_score_with_reason(bounded, clean, full)
+            bounded, _ = _align_score_with_reason(bounded, verdict, full)
         # clear=true 必须写出片段中的具体画面 没写或结论与满分相反时这次改判不可信 按看不清处理
         # 否则分数改了 reason 却留着上一轮「未执行」 冲突检测读到的仍是旧结论
-        if clear and (not clean or _contradicts_full_mark(bounded, clean, full)):
+        if clear and (not clean or _contradicts_full_mark(bounded, verdict, full)):
             logger.info("二次复核: 评分项 %s 改判理由缺失或与分数矛盾 按看不清处理", item["number"])
             clear = False
             bounded = 0.0

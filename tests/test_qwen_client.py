@@ -174,6 +174,63 @@ class AlignScoreWithReasonTest(unittest.TestCase):
         self.assertTrue(q._contradicts_full_mark(0.2, "支点悬空，未达标", 0.2))
         self.assertTrue(q._contradicts_full_mark(0.15, "右手持探针，左手未持口镜，仅稳定模型", 0.15))
 
+    def test_missing_tool_phrasing_is_a_verdict(self):
+        # 144 第 4 项原句: 分数满分而理由写着全程没拿起口镜
+        self.assertTrue(q._contradicts_full_mark(
+            0.15, "画面可见左手扶持并固定牙模型（非口镜），全程未见考生左手持该器械", 0.15,
+        ))
+        self.assertTrue(q._contradicts_full_mark(0.2, "全片未见使用口镜牵拉口角", 0.2))
+        # 144 补证返回: 条件要求被引号隔开 不能只认紧贴的「不符合要求」
+        self.assertTrue(q._contradicts_full_mark(
+            0.15, "双手分工为左探针、右持模型，不符合‘左手持口镜、右手持探针’要求", 0.15,
+        ))
+
+
+class DemoteContradictedFullMarksTest(unittest.TestCase):
+    """满分但理由写着没做到: 链路各环节只往上改分 没人看分数与理由是否一致"""
+
+    def _result(self, score: float) -> dict:
+        return {
+            "full_score": 0.4,
+            "total_score": round(score + 0.2, 2),
+            "items": [
+                {
+                    "number": "2", "point": "口镜牵拉口角", "full_score": 0.2,
+                    "score": score,
+                    "reason": "全片关键帧中未见口镜牵拉口角动作，左手始终未持口镜",
+                },
+                {
+                    "number": "1", "point": "选用5号镰形探针", "full_score": 0.2,
+                    "score": 0.2, "reason": "@00:10 右手持镰形探针，口述一致，达标",
+                },
+            ],
+        }
+
+    def test_full_score_with_negative_reason_is_demoted(self):
+        result = self._result(0.2)
+        changed = q.demote_contradicted_full_marks(result)
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(changed[0]["from"], 0.2)
+        self.assertEqual(changed[0]["to"], 0.0)
+        self.assertEqual(result["items"][0]["score"], 0.0)
+        self.assertAlmostEqual(result["total_score"], 0.2)
+        self.assertEqual(len(result["deductions"]), 1)
+        # 归零不是终态: 排在补证与姿态复验之前 真做了会在那里升回来
+        self.assertIn("未达成", result["items"][0]["recheck"])
+        self.assertEqual(len(result["aligned"]), 1)
+
+    def test_partial_score_is_left_alone(self):
+        # 已经低于满分的项本来就承认没做到 不必再降
+        result = self._result(0.12)
+        self.assertEqual(q.demote_contradicted_full_marks(result), [])
+        self.assertAlmostEqual(result["items"][0]["score"], 0.12)
+
+    def test_positive_reason_keeps_full_score(self):
+        result = self._result(0.2)
+        result["items"][0]["reason"] = "@00:26 动作轻柔 未见戳刺牙龈"
+        self.assertEqual(q.demote_contradicted_full_marks(result), [])
+        self.assertAlmostEqual(result["items"][0]["score"], 0.2)
+
 
 class CleanSummaryTest(unittest.TestCase):
     def test_removes_list_marks(self):
