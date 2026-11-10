@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     # 未满分的姿态项各花一次调用 项数通常 1~2 项
     MEDIA_POSE_PROBE_ENABLED: bool = True
     MEDIA_POSE_PROBE_FRAMES: int = 12
+    # 客观事实表: 先于评分确认一次客观事实（器械是否存在、哪只手拿、动作是否发生）
+    # 各项判分只消费同一份事实 从结构上消除「第2项未见口镜、第4项右手持口镜」这类跨项矛盾
+    # 多花一次带帧调用 拿不到事实时自动回退原链路
+    MEDIA_FACTS_ENABLED: bool = True
     # 千问思考模式: 把推理挪出 reason 字段 但更慢更贵 效果未经 A/B 确认前默认关闭
     QWEN_ENABLE_THINKING: bool = False
     QWEN_THINKING_BUDGET: int = 4096

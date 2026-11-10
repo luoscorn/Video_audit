@@ -18,9 +18,11 @@ from db.db import (
 from services.qwen_client import (
     arbitrate_conflicts,
     demote_contradicted_full_marks,
+    extract_facts,
     rewrite_summary,
     score_video,
     score_video_with_rubric,
+    verify_facts,
     vote_deducted_items,
 )
 from services.asr_client import build_asr_context
@@ -207,6 +209,36 @@ async def _process_audit_task(task_id: int) -> None:
             else:
                 logger.info("[Worker]   切片/语音抽取已关闭(AUDIT_MEDIA_ENABLED=false)")
 
+            # 4.7 抽取客观事实表：先于评分确认一次客观事实（器械是否存在、哪只手拿、动作是否发生）
+            #     各项判分只消费同一份事实 从结构上消除「第2项未见口镜、第4项右手持口镜」这类跨项矛盾
+            #     失败或关开关时不启用 回退到各项自行看图的原链路
+            facts = None
+            if settings.MEDIA_FACTS_ENABLED and rubric_items and evidence is not None:
+                facts_start = time.time()
+                try:
+                    facts = await asyncio.to_thread(
+                        extract_facts, task.audit_type, rubric_items, evidence
+                    )
+                    if facts is None:
+                        logger.warning("[Worker]   客观事实表: 未得到有效事实 本次按原链路打分")
+                    else:
+                        logger.info(
+                            "[Worker]   客观事实表: 器械%d条 动作%d条 (耗时 %.1fs)",
+                            len(facts["instruments"]),
+                            len(facts["actions"]),
+                            time.time() - facts_start,
+                        )
+                        for row in facts["instruments"] + facts["actions"]:
+                            logger.info(
+                                "[Worker]   %s %s -> %s",
+                                row["id"], row["name"],
+                                "是" if row["occurred"] is True
+                                else ("否" if row["occurred"] is False else "看不清"),
+                            )
+                except Exception as exc:
+                    facts = None
+                    logger.warning("[Worker]   客观事实表抽取失败 按原链路打分: %s", exc)
+
             # 5. 调用 AI 打分（带重试）
             logger.info("[Worker]   正在调用 AI 打分 (最多重试%d次)...", _MAX_RETRIES)
             result = None
@@ -222,6 +254,7 @@ async def _process_audit_task(task_id: int) -> None:
                             rubric_items=rubric_items,
                             audit_type=task.audit_type,
                             evidence=evidence,
+                            facts=facts,
                         )
                     else:
                         result = await asyncio.to_thread(
@@ -273,6 +306,7 @@ async def _process_audit_task(task_id: int) -> None:
                         result,
                         task.audit_type,
                         evidence,
+                        facts,
                     )
                     if voted is None:
                         logger.info(
@@ -308,6 +342,19 @@ async def _process_audit_task(task_id: int) -> None:
                         )
                 except Exception as exc:
                     logger.warning("[Worker]   分数与理由对齐失败 沿用原结果: %s", exc)
+                # 同一位置再做一次确定性校验: 满分项不得以已被确认「未发生」的事实得分
+                # 依据来自 4.7 的事实表而不是模型自己写的理由 两者互补
+                if facts:
+                    try:
+                        violated = verify_facts(result, facts)
+                        for change in violated:
+                            logger.info(
+                                "[Worker]   ~ %s: %s → %s（依据事实确认未发生 %s）",
+                                change["point"], change["from"], change["to"], change["facts"],
+                            )
+                        result["facts"] = facts
+                    except Exception as exc:
+                        logger.warning("[Worker]   事实校验失败 沿用原结果: %s", exc)
 
             # 5.5 二次补证：对证据受限的评分项切连续片段复核 失败不阻断
             if settings.MEDIA_SUPPLEMENT_ENABLED and rubric_items and evidence is not None:
@@ -405,7 +452,7 @@ async def _process_audit_task(task_id: int) -> None:
 
             # 5.7 摘要按最终明细重写：首轮摘要与后来改过的分数会互相矛盾
             #     实测第 2、4 项已给满分 摘要却写「未使用口镜牵拉、左手未持口镜」
-            if any(result.get(key) for key in ("vote", "supplement", "pose_probe", "conflicts", "aligned")):
+            if any(result.get(key) for key in ("vote", "supplement", "pose_probe", "conflicts", "aligned", "fact_check")):
                 try:
                     rewritten = await asyncio.to_thread(rewrite_summary, task.audit_type, result)
                     if rewritten:

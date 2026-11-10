@@ -1134,5 +1134,100 @@ class ThinkingSwitchTest(unittest.TestCase):
         self.assertNotIn("extra_body", captured)
 
 
+class FactsTest(unittest.TestCase):
+    """客观事实表: 同一事实只有一个来源 各项只消费它 从而消除跨项矛盾"""
+
+    def _facts(self, held: object = False, note: str = "托盘内可见口镜 全片未被拿起") -> dict:
+        return {
+            "instruments": [
+                {"id": "F1", "kind": "instrument", "name": "口镜", "occurred": held,
+                 "hand": "无法判断", "time": "无", "note": note},
+            ],
+            "actions": [
+                {"id": "F2", "kind": "action", "name": "口镜镜面抵住模型口角",
+                 "occurred": None, "hand": "", "time": "无", "note": "画面未拍到口角"},
+            ],
+            "total": 2,
+        }
+
+    def _result(self, score: float, fact_ids: list[str]) -> dict:
+        return {
+            "full_score": 0.35,
+            "total_score": round(score + 0.2, 2),
+            "items": [
+                {"number": "4", "point": "左手持口镜、右手持探针", "full_score": 0.15,
+                 "score": score, "reason": "两手各持不同器械", "fact_ids": fact_ids},
+                {"number": "1", "point": "选用5号镰形探针", "full_score": 0.2,
+                 "score": 0.2, "reason": "@00:05 手持探针"},
+            ],
+        }
+
+    def test_tristate_parsing(self):
+        self.assertIs(q._as_tristate(True), True)
+        self.assertIs(q._as_tristate("false"), False)
+        self.assertIsNone(q._as_tristate("看不清"))
+        self.assertIsNone(q._as_tristate(None))
+
+    def test_normalize_numbers_are_sequential(self):
+        facts = q._normalize_facts({
+            "instruments": [{"name": "口镜", "held": "false"}, {"name": ""}],
+            "actions": [{"statement": "牵拉口角", "occurred": "true"}],
+        })
+        self.assertEqual([f["id"] for f in facts["instruments"]], ["F1"])
+        self.assertEqual([f["id"] for f in facts["actions"]], ["F2"])
+        self.assertIs(facts["actions"][0]["occurred"], True)
+
+    def test_fact_ids_are_filtered(self):
+        self.assertEqual(q._clean_fact_ids(["f1", "F1", "X9", "F12"]), ["F1", "F12"])
+        self.assertEqual(q._clean_fact_ids(None), [])
+
+    def test_block_is_empty_without_facts(self):
+        self.assertEqual(q._facts_block(None), "")
+        self.assertIn("发生：否", q._facts_block(self._facts()))
+
+    def test_full_mark_on_negated_fact_is_demoted(self):
+        result = self._result(0.15, ["F1"])
+        changed = q.verify_facts(result, self._facts())
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(changed[0]["to"], 0.0)
+        self.assertEqual(result["items"][0]["score"], 0.0)
+        self.assertAlmostEqual(result["total_score"], 0.2)
+        self.assertEqual(result["fact_check"][0]["facts"], ["F1 口镜"])
+
+    def test_partial_score_is_left_alone(self):
+        result = self._result(0.08, ["F1"])
+        self.assertEqual(q.verify_facts(result, self._facts()), [])
+        self.assertAlmostEqual(result["items"][0]["score"], 0.08)
+
+    def test_negated_fact_without_note_is_not_trusted(self):
+        # 没有依据的否定与「看不清」同义 不得据此降分
+        result = self._result(0.15, ["F1"])
+        self.assertEqual(q.verify_facts(result, self._facts(note="")), [])
+        self.assertAlmostEqual(result["items"][0]["score"], 0.15)
+
+    def test_unclear_fact_does_not_demote(self):
+        result = self._result(0.15, ["F2"])
+        self.assertEqual(q.verify_facts(result, self._facts()), [])
+
+    def test_no_citation_does_not_demote(self):
+        result = self._result(0.15, [])
+        self.assertEqual(q.verify_facts(result, self._facts()), [])
+
+    def test_facts_are_injected_into_scoring_prompt(self):
+        captured = {}
+        original = q._call_model
+        q._call_model = lambda system_prompt, *a, **kw: captured.update(sys=system_prompt) or (
+            '{"items":[{"number":"1","score":0.2,"reason":"达标"}],"summary":"ok"}'
+        )
+        try:
+            q.score_video_with_rubric(
+                "http://example/v.mp4", _items(), "测试项目", None, facts=self._facts(),
+            )
+        finally:
+            q._call_model = original
+        self.assertIn("【客观事实表】", captured["sys"])
+        self.assertIn("F1 [器械] 口镜", captured["sys"])
+
+
 if __name__ == "__main__":
     unittest.main()

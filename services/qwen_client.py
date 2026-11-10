@@ -41,8 +41,8 @@ _REQUEST_TIMEOUT = 180.0
 _MAX_REPAIR_ROUNDS = 1
 _MISSING_SCORE_RATIO = 0.6
 _MISSING_ITEM_REASON = "模型未返回该评分项 判定缺失 按证据受限档下限暂记 需人工复核"
-# summary 长度上限 与 _SCORING_POLICY 声明的 60 字保持一致
-_SUMMARY_MAX_CHARS = 60
+# summary 长度上限 与 _SCORING_POLICY 声明的字数保持一致
+_SUMMARY_MAX_CHARS = 80
 # 规范参考图: 单项取几张与整单总张数上限
 # 同一评分点常配多张(不同角度/正误对照) 只取首图会丢掉一半判断依据
 # 总量仍要扣着算: 叠加切片关键帧后单请求图片总数不宜再涨
@@ -95,7 +95,7 @@ _SCORING_POLICY = """【评分尺度：按评分表严格判定 该扣必扣 但
    - 姿态类评分点只看做过没有，不看做得久不久、稳不稳：口镜牵拉口角、无名指支点、执笔式握持这类是维持性姿态，只要任一关键帧出现过该姿态、或口述说明自己这么做，即认定达成并给该项满分，不要求持续时长、不要求全程维持、不要求姿态稳定不变形；中途放下器械、相邻帧姿态变化、部分帧镜面未接触、手指出画或被遮挡，一律不构成扣分理由。reason 里不得出现「非持续」「偶有悬空」「未同步维持」「不稳定」这类以持续时长或稳定性为由的表述。
    - 每项只按该项评分点的字面要求判定，不得把其他评分项的要求挪作本项的扣分理由：例如「口镜牵拉口角」这项才要求口镜实际牵拉，而「左手持口镜、右手持探针」这类持械项只要求两手各持对应器械，全程未牵拉也不影响本项给满分。
    - 同一处缺陷只在它对应的评分点扣一次分，不得跨项重复扣：例如未牵拉口角已在「口镜牵拉口角」项扣分，就不得再以此为由扣「持械分工」项的分；每项 reason 只引用与本项评分点直接相关的证据。
-5. summary 只写总体结论：用一两句话概括整体完成情况与主要失分方向（不超过 60 字），不逐条罗列失分点、不复述各扣分明细（细节放在对应 items 的 reason 里），不使用表扬、鼓励式表述，也不写空泛套话。summary 不得与 items 明细相反：已判满分的评分点，不得在 summary 里写成未使用、未做到、缺失。"""
+5. summary 只写总体结论：用一两句话概括整体完成情况与主要失分方向（不超过 80 字）句子完整，不逐条罗列失分点、不复述各扣分明细（细节放在对应 items 的 reason 里），不使用表扬、鼓励式表述，也不写空泛套话。summary 不得与 items 明细相反：已判满分的评分点，不得在 summary 里写成未使用、未做到、缺失。"""
 
 # 器械与姿态的专属认定口径: 只有评分项里提到相关字眼时才写进提示词
 # 27 个审核类型共用同一份评分尺度 心肺复苏、测血压读到「口镜与牙科镊的区别」只会稀释注意力
@@ -145,7 +145,7 @@ _OUTPUT_FORMAT = """请严格按照以下 JSON 格式返回打分结果，不要
       "reason": "<扣分原因，说明操作不规范之处>"
     }
   ],
-  "summary": "<总体结论，一两句话概括完成情况与主要失分方向，不逐条罗列失分点，不超过 60 字>"
+  "summary": "<总体结论，一两句话概括完成情况与主要失分方向，不逐条罗列失分点，不超过 80 字>"
 }
 重要：total_score 必须严格等于 full_score - sum(deduct_score)，请仔细核对计算。
 各项均达标时 deductions 为空数组，total_score 等于 full_score；只要有评分点未达标就必须列出对应扣分。"""
@@ -158,10 +158,11 @@ _RUBRIC_OUTPUT_FORMAT = """请严格按照以下 JSON 格式返回评分结果�
       "number": "<评分项编号，如 ①>",
       "score": <float, 该项实际得分>,
       "time": "<该评分点证据所在时刻，格式 mm:ss 或 mm:ss-mm:ss，必须取自关键帧标签中的 @mm:ss；全片无任何迹象填 无>",
-      "reason": "<判定理由，说明画面或语音中可见/可闻的依据>"
+      "reason": "<判定理由，说明画面或语音中可见/可闻的依据>",
+      "fact_ids": ["<本项给分依据所引用的客观事实编号，如 F1 F3；未引用事实表时留空数组>"]
     }
   ],
-  "summary": "<总体结论，一两句话概括完成情况与主要失分方向，不逐条罗列失分点，不超过 60 字>"
+  "summary": "<总体结论，一两句话概括完成情况与主要失分方向，不逐条罗列失分点，不超过 80 字>"
 }
 要求：
 1. items 必须覆盖评分规则中的全部评分项，每个编号恰好出现一次，不得遗漏、重复或编造编号。
@@ -170,7 +171,8 @@ _RUBRIC_OUTPUT_FORMAT = """请严格按照以下 JSON 格式返回评分结果�
 4. reason 必须引用口述原文或画面中的具体依据，不能只写“未做到”“不规范”等空泛描述。
 5. reason 用陈述句直接写判定依据与结论，不超过 100 字；分数只由 score 字段表达。禁止出现算式、分值换算（如 0.2×0.8=0.16）、“取上限/取下限”、百分比档位描述（如“给60%”“按80%给分”），以及任何思考过程：反问句、“但按规则应”“再核一遍”“不，应该是”“故应得”这类自我辩论和改口重判，一律不得写进 reason。reason 只写一次最终结论，如“@00:26 右手无名指抵住模型下颌基座，口述提及支点，达标”，不写你是如何一步步想出来的。
 6. time 用于证据受限项的二次复核定位，必须直接引用关键帧标签里的 @mm:ss，不得自行推算；动作持续一段时写起止两个时刻，无法定位填 无。
-7. summary 不重复 items 里的扣分点，只给总体完成度式的结论。"""
+7. summary 不重复 items 里的扣分点，只给总体完成度式的结论。
+8. fact_ids 只在提示词提供了【客观事实表】时填写：编号必须取自该表，按本项实际依据的事实填写；找不到对应事实时留空数组，不得编造编号。"""
 
 # reason 里模型常附带分数换算过程 统一剔除 只保留判定依据
 # 例: “给60%即0.12分”、“按80%×0.1=0.08分”、“四舍五入为0.15分”、“扣0.05分”、“得0.14”
@@ -385,8 +387,12 @@ def _build_system_prompt(
     rules_block: str,
     output_format: str,
     evidence: Optional[VideoEvidence],
+    extra_block: str = "",
 ) -> str:
-    """拼装系统提示词: 评分规则 + 严格评分尺度 + 证据说明 + 输出格式"""
+    """拼装系统提示词: 评分规则 + 严格评分尺度 + 证据说明 + 输出格式
+
+    :param extra_block: 评分尺度之后的额外约束（如客观事实表），条目比尺度低一级
+    """
     parts = [
         "你是一位严格、客观的口腔医学操作考核评分专家，只依据评分表与视频证据判定，不放宽标准。",
         f"请根据以下评分规则，对「{audit_type}」操作进行逐项打分。",
@@ -395,6 +401,8 @@ def _build_system_prompt(
         "",
         _scoring_policy(rules_block),
     ]
+    if extra_block:
+        parts += ["", extra_block]
     if evidence is not None:
         parts += ["", _EVIDENCE_NOTE]
     parts += ["", "【输出要求】", output_format]
@@ -589,11 +597,13 @@ def _judge_items(
     evidence: Optional[VideoEvidence],
     instruction: str,
     temperature: float = _DEFAULT_TEMPERATURE,
+    facts: Optional[dict] = None,
 ) -> list[dict]:
     """只对指定评分项判一次 复用同一份证据
 
     缺项补问与扣分项投票共用这条路径 保证两处的提示词结构完全一致
 
+    :param facts: 客观事实表 带上它才能保证多次重判仍与同一事实一致
     :return: 模型返回的原始 items 数组 编号合法性由调用方校验
     """
     if not targets:
@@ -606,6 +616,7 @@ def _judge_items(
         f"也不得把多个评分项合并成一条\n{_format_rubric(targets, group=False)}",
         _RUBRIC_OUTPUT_FORMAT,
         evidence,
+        extra_block=_facts_block(facts),
     )
     user_content = _build_user_content(
         video_url, evidence, instruction, _prompt_reference_images(targets),
@@ -692,11 +703,262 @@ def format_rubric_preview(rubric_items: list[RubricItem]) -> str:
     return _format_rubric(rubric_items)
 
 
+# ==================== 客观事实表 ====================
+# 各项各自看图时 同一客观事实会被独立观察多次 结论互相打架
+# 实测 145 第 2 项写「全程未见口镜」 第 4 项写「右手持口镜」并给满分 两者不可能同时为真
+# 事实表先于评分、独立于评分标准确认一次 各项只消费同一份结论
+# 这样跨项矛盾在结构上不会出现 剩下只需校验「给分是否与所引事实一致」
+
+_FACTS_SYSTEM = """你是考核视频的客观观察员。本次只记录画面与语音里可以直接确认的事实：
+不打分、不评价动作是否规范、不判断是否达标、不引用评分项编号。
+你看到的是按时间组织的关键帧图片与语音转写，标签中的 @mm:ss 是该帧的准确时刻。
+要求：
+1. 只写能从画面或语音直接确认的内容，不推测意图。看不清就填 null，不要用「未见」「未使用」代替「看不清」。
+2. 同一客观事实只写一条，不要为不同评分点重复记录：某个器械是否被手持、哪只手拿着、镜面是否接触某部位，全片各写一次。
+3. 画面里两只手都出现且左右方向明确时才写 hand；机位可能镜像或对镜拍摄，无法确定时写「无法判断」，不要猜。
+4. 不写任何分数、档位、是否达标之类的评价。"""
+
+_FACTS_FORMAT = """请严格按照以下 JSON 返回，不要输出任何多余内容：
+{
+  "instruments": [
+    {
+      "name": "<器械名，如 口镜 / 探针 / 镊子 / 注射器 / 血压计袖带>",
+      "held": <true 表示有任一帧被手持，false 表示全片确未被手持，null 表示看不清>,
+      "hand": "<左手 / 右手 / 双手 / 无法判断 / 无>",
+      "time": "<@mm:ss 或 mm:ss-mm:ss；没有填 无>",
+      "note": "<形态特征与握持依据，如 白色长柄末端扁平圆盘>"
+    }
+  ],
+  "actions": [
+    {
+      "statement": "<一句客观事实陈述，只写发生了什么，不写是否达标，如 口镜镜面抵住模型左侧口角>",
+      "occurred": <true 表示任一帧可见该动作，false 表示全片确未见，null 表示看不清>,
+      "time": "<@mm:ss 或 mm:ss-mm:ss；没有填 无>",
+      "note": "<你据以判断的画面内容>"
+    }
+  ]
+}
+要求：
+1. instruments 要覆盖画面里出现过的所有器械，包括只摆在托盘里没被拿起的。
+2. actions 至少覆盖下面清单里每个评分点涉及的动作，每个动作一条，同一动作不要重复。
+3. occurred 填 false 时必须写出你检查到的帧范围或画面内容，证明确实没有任何一帧出现该动作；只是角度不好、被挡住、看不清的一律填 null。
+4. 不输出与本次操作无关的泛泛描述。"""
+
+# 交给判分模型的约束: 事实表是单一口径来源 各项不得自行补判
+_FACTS_NOTE = """【客观事实表】以下是对同一次视频先行确认的客观事实，编号 F 开头。评分必须以本表为准：
+- 标「发生：否」的事实：任何评分项都不得判定该事实成立，也不得据此给分；
+- 标「发生：看不清」的事实：按评分尺度的证据受限档判定，不得据此判整项未执行，也不得给满分；
+- 本表没有列出、而评分项要求的细节：同样按证据受限档处理，不得自行补判为已做或未做；
+- 每项在 fact_ids 里填写本项给分所依据的事实编号。"""
+
+
+def _as_tristate(value) -> Optional[bool]:
+    """三态布尔: true / false / None（看不清） 字符串与布尔值都兼容"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("true", "1", "yes", "是", "发生", "有"):
+            return True
+        if text in ("false", "0", "no", "否", "未发生", "无"):
+            return False
+    return None
+
+
+def _clean_fact_ids(value) -> list[str]:
+    """规整评分项引用的事实编号 F1/F2 去重保序 非法编号丢弃"""
+    if not isinstance(value, (list, tuple)):
+        return []
+    picked: list[str] = []
+    for raw in value:
+        text = str(raw or "").strip().upper()
+        if not re.fullmatch(r"F\d{1,3}", text):
+            continue
+        if text not in picked:
+            picked.append(text)
+    return picked
+
+
+def _fact_targets(rubric_items: list[RubricItem]) -> str:
+    """事实抽取的观察清单: 只列动作对象 不带分值、判定口径与档位
+
+    带档位会让观察环节顺手把结论也写出来 就不是客观事实了
+    """
+    return "\n".join(f"- {_inline(item.point)}" for item in rubric_items if item.point)
+
+
+def _normalize_facts(data: dict) -> dict:
+    """事实表规整并统一编号: 器械 F1.. 动作接续
+
+    编号由服务端生成 模型给的编号不可信(可能重复或跳号) 评分项引用的是这份编号
+    """
+    instruments: list[dict] = []
+    actions: list[dict] = []
+    for raw in data.get("instruments") or []:
+        if not isinstance(raw, dict):
+            continue
+        name = _inline(raw.get("name"))
+        if not name:
+            continue
+        instruments.append({
+            "id": f"F{len(instruments) + len(actions) + 1}",
+            "kind": "instrument",
+            "name": name,
+            "occurred": _as_tristate(raw.get("held")),
+            "hand": _inline(raw.get("hand")) or "无法判断",
+            "time": _inline(raw.get("time")) or "无",
+            "note": _clean_reason(str(raw.get("note") or "")),
+        })
+    for raw in data.get("actions") or []:
+        if not isinstance(raw, dict):
+            continue
+        statement = _inline(raw.get("statement"))
+        if not statement:
+            continue
+        actions.append({
+            "id": f"F{len(instruments) + len(actions) + 1}",
+            "kind": "action",
+            "name": statement,
+            "occurred": _as_tristate(raw.get("occurred")),
+            "hand": "",
+            "time": _inline(raw.get("time")) or "无",
+            "note": _clean_reason(str(raw.get("note") or "")),
+        })
+    return {
+        "instruments": instruments,
+        "actions": actions,
+        "total": len(instruments) + len(actions),
+    }
+
+
+def _format_facts(facts: Optional[dict]) -> str:
+    """事实表转提示词文本 一行一条带编号"""
+    if not facts:
+        return ""
+    lines = []
+    for fact in (facts.get("instruments") or []) + (facts.get("actions") or []):
+        tag = "器械" if fact.get("kind") == "instrument" else "动作"
+        state = "是" if fact.get("occurred") is True else ("否" if fact.get("occurred") is False else "看不清")
+        line = f"{fact['id']} [{tag}] {fact['name']}｜发生：{state}"
+        if fact.get("hand"):
+            line += f"｜手别：{fact['hand']}"
+        line += f"｜时刻：{fact.get('time') or '无'}"
+        if fact.get("note"):
+            line += f"｜依据：{fact['note']}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _facts_lookup(facts: Optional[dict]) -> dict[str, dict]:
+    """事实编号 -> 事实"""
+    if not facts:
+        return {}
+    pairs = (facts.get("instruments") or []) + (facts.get("actions") or [])
+    return {fact["id"]: fact for fact in pairs}
+
+
+def _facts_block(facts: Optional[dict]) -> str:
+    """判分提示词里的事实表块 没有事实表时返回空串（回退原链路）"""
+    text = _format_facts(facts)
+    if not text:
+        return ""
+    return "\n".join([_FACTS_NOTE, "", text])
+
+
+def extract_facts(
+    audit_type: str,
+    rubric_items: list[RubricItem],
+    evidence: Optional[VideoEvidence],
+) -> Optional[dict]:
+    """先于评分抽取客观事实表
+
+    只做观察不做判定 因此不携带评分尺度与给分档位
+    拿不到证据、解析失败或一条事实都没得到时返回 None 由调用方回退原链路
+
+    :param rubric_items: 只用来列观察清单（每个评分点涉及的动作）
+    :return: {instruments, actions, total}；失败返回 None
+    """
+    if evidence is None or not evidence.has_evidence:
+        return None
+    instruction = "\n".join([
+        "以下是同一次操作的关键帧与语音转写。",
+        "",
+        "【本场考核的评分点清单】只用来提醒你画面里值得核对的器械与动作，不要评价这些评分点：",
+        _fact_targets(rubric_items),
+        "",
+        _FACTS_FORMAT,
+    ])
+    content: list[dict] = [{"type": "text", "text": instruction}]
+    content.append({"type": "text", "text": evidence.timeline_text()})
+    for label, frame in frames_payload(evidence):
+        content.append({"type": "text", "text": f"{label}："})
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{frame}"},
+        })
+    content.append({"type": "text", "text": "请以 JSON 返回客观事实表。"})
+
+    data = _parse_json(_call_model(_FACTS_SYSTEM, content, audit_type))
+    facts = _normalize_facts(data)
+    if not facts["total"]:
+        logger.warning("事实抽取: 未得到任何客观事实 本次不启用事实表")
+        return None
+    logger.info(
+        "事实抽取完成: 器械%d条 动作%d条",
+        len(facts["instruments"]), len(facts["actions"]),
+    )
+    return facts
+
+
+def verify_facts(result: dict, facts: Optional[dict]) -> list[dict]:
+    """确定性校验: 满分项不得以其依据已被确认「未发生」的事实得分
+
+    纯本地重算 不花模型调用 与 demote_contradicted_full_marks 同一目的（让分数服从依据）
+    区别是依据来自先行确认的事实表 不是模型自己写的理由
+    只对满分项生效: 部分分可能来自多项事实中的其他依据 由补证与仲裁处理
+    只降不升: 事实表看不清时不在这里改分
+
+    :return: [{number, point, from, to, facts}] 无变更返回空列表
+    """
+    lookup = _facts_lookup(facts)
+    if not lookup:
+        return []
+    changed = []
+    for item in result.get("items") or []:
+        full = float(item.get("full_score") or 0)
+        score = float(item.get("score") or 0)
+        if full <= 0 or score < full - 0.001:
+            continue
+        cited = [lookup[fid] for fid in item.get("fact_ids") or [] if fid in lookup]
+        # note 为空的事实不据此降分 没有依据的否定与「看不清」同义
+        violated = [f for f in cited if f.get("occurred") is False and f.get("note")]
+        if not violated:
+            continue
+        item["score"] = 0.0
+        item["recheck"] = "依据的事实经确认为未发生，按未达成计分"
+        changed.append({
+            "number": item["number"],
+            "point": item["point"],
+            "from": score,
+            "to": 0.0,
+            "facts": [f"{f['id']} {f['name']}" for f in violated],
+        })
+        logger.info(
+            "事实校验: 评分项 %s 由 %.2f 归零（所引事实确认为未发生 %s）",
+            item["point"], score, [f["id"] for f in violated],
+        )
+    if changed:
+        _recalc_totals(result)
+        result["fact_check"] = changed
+    return changed
+
+
 def score_video_with_rubric(
     video_url: str,
     rubric_items: list[RubricItem],
     audit_type: str,
     evidence: Optional[VideoEvidence] = None,
+    facts: Optional[dict] = None,
 ) -> dict:
     """
     按结构化评分项逐项打分 总分由服务端汇总
@@ -705,6 +967,7 @@ def score_video_with_rubric(
     :param rubric_items: 从 xlsx 解析出的评分项
     :param audit_type: 审核类型中文名
     :param evidence: 切片关键帧 + 语音转写证据 为 None 时回退整段视频
+    :param facts: 客观事实表 有则只许据此判定 各项目标一致
     :return: 含 full_score / total_score / deductions / items / summary 的 dict
     """
     if not rubric_items:
@@ -716,6 +979,7 @@ def score_video_with_rubric(
         f"【评分规则】共 {len(rubric_items)} 个评分项，满分 {full_score:g} 分\n{_format_rubric(rubric_items)}",
         _RUBRIC_OUTPUT_FORMAT,
         evidence,
+        extra_block=_facts_block(facts),
     )
     reference_images = _prompt_reference_images(rubric_items)
     user_content = _build_user_content(
@@ -733,7 +997,7 @@ def score_video_with_rubric(
         "切片关键帧+语音" if evidence is not None else "整段视频",
     )
     raw_text = _call_model(system_prompt, user_content, audit_type)
-    return _finalize_rubric_result(raw_text, rubric_items, audit_type, video_url, evidence)
+    return _finalize_rubric_result(raw_text, rubric_items, audit_type, video_url, evidence, facts)
 
 
 def _assemble_result(
@@ -799,6 +1063,8 @@ def _assemble_result(
             "time": str(raw_item.get("time", "")).strip(),   # 证据时刻 供二次补证定位
             "reason": reason,
             "fallback": bool(raw_item.get("fallback")),       # 补问仍缺时的兜底项 需人工复核
+            # 给分依据引用的客观事实编号 供服务端做确定性一致性校验
+            "fact_ids": _clean_fact_ids(raw_item.get("fact_ids")),
         })
         if score < rubric.score:
             deductions.append({
@@ -827,12 +1093,14 @@ def _reask_missing(
     audit_type: str,
     video_url: str,
     evidence: Optional[VideoEvidence],
+    facts: Optional[dict] = None,
 ) -> list[dict]:
     """只对缺失评分项补问一次 复用同一份证据 避免整单重跑视频与转写"""
     targets = [item for item in rubric_items if item.number in set(missing)]
     return _judge_items(
         targets, audit_type, video_url, evidence,
         instruction="请只对上述评分项打分，以 JSON 格式返回结果。",
+        facts=facts,
     )
 
 
@@ -842,6 +1110,7 @@ def _finalize_rubric_result(
     audit_type: str,
     video_url: str,
     evidence: Optional[VideoEvidence],
+    facts: Optional[dict] = None,
 ) -> dict:
     """校验逐项结果: 缺项先补问一次 补问仍缺按证据受限档下限兜底 不让整单失败重跑"""
     data = _parse_json(raw_text)
@@ -858,7 +1127,7 @@ def _finalize_rubric_result(
         logger.warning("打分结果缺少评分项 %s 补问一次", missing)
         try:
             raw_items = raw_items + _reask_missing(
-                missing, rubric_items, audit_type, video_url, evidence
+                missing, rubric_items, audit_type, video_url, evidence, facts
             )
         except Exception:
             logger.exception("补问缺失评分项失败 直接按兜底处理")
@@ -1120,6 +1389,7 @@ def vote_deducted_items(
     result: dict,
     audit_type: str,
     evidence: Optional[VideoEvidence] = None,
+    facts: Optional[dict] = None,
 ) -> Optional[dict]:
     """只对已扣分与证据空泛的满分项重判若干次 逐项取中位数
 
@@ -1171,6 +1441,7 @@ def vote_deducted_items(
                 targets, audit_type, video_url, evidence,
                 "请独立判定上述评分项，以 JSON 格式返回结果。",
                 temperature,
+                facts=facts,
             )
         except Exception:
             logger.exception("扣分项投票第 %.1f 轮失败 该轮不计入", temperature)
@@ -1244,6 +1515,7 @@ def _rebuild_from_entries(result: dict, rubric_items: list[RubricItem]) -> dict:
             "reason": entry.get("reason", ""),
             "time": entry.get("time", ""),
             "fallback": entry.get("fallback", False),
+            "fact_ids": entry.get("fact_ids", []),
         }
         for entry in result.get("items") or []
     ]
