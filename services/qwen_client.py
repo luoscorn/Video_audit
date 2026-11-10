@@ -1509,6 +1509,8 @@ def _rebuild_from_entries(result: dict, rubric_items: list[RubricItem]) -> dict:
     """分数已在 entries 上改过时  复用首轮那套汇总重算总分与扣分项
 
     避免投票与冲突仲裁各自写一份汇总算法与首轮分叉
+    _assemble_result 只重建评分项与总分 各环节留下的元信息必须显式带过来
+    否则投票后再走仲裁 前面的 supplement/pose_probe 痕迹会整段丢失 事后无法复盘
     """
     raw = [
         {
@@ -1522,6 +1524,9 @@ def _rebuild_from_entries(result: dict, rubric_items: list[RubricItem]) -> dict:
         for entry in result.get("items") or []
     ]
     rebuilt, _ = _assemble_result(raw, result.get("summary", ""), rubric_items)
+    for key, value in result.items():
+        if key not in rebuilt and key not in ("items", "deductions", "total_score", "full_score"):
+            rebuilt[key] = value
     return rebuilt
 
 
@@ -1590,12 +1595,30 @@ def _detect_conflicts(result: dict, audit_type: str) -> list[dict]:
     return found[:_CONFLICT_MAX_GROUPS]
 
 
+def _cited_absent_facts(
+    entry: dict, old_entry: dict, lookup: dict[str, dict]
+) -> list[dict]:
+    """拟抬分项引用的事实里 已被确认「未发生」的那几条
+
+    事实表先于评分独立观察 与评分项自报的 fact_ids 一起构成硬约束
+    note 为空的否定与「看不清」同义 不作为依据
+    """
+    if not lookup:
+        return []
+    cited = _clean_fact_ids(entry.get("fact_ids")) or _clean_fact_ids(old_entry.get("fact_ids"))
+    return [
+        lookup[fid] for fid in cited
+        if fid in lookup and lookup[fid].get("occurred") is False and lookup[fid].get("note")
+    ]
+
+
 def arbitrate_conflicts(
     video_url: str,
     rubric_items: list[RubricItem],
     result: dict,
     audit_type: str,
     evidence: Optional[VideoEvidence] = None,
+    facts: Optional[dict] = None,
 ) -> Optional[dict]:
     """把结果里对同一事实给出相反认定的评分项打包重判一次
 
@@ -1603,6 +1626,7 @@ def arbitrate_conflicts(
     实测同一段证据下第 4 项写「左手持口镜」 第 2 项同时入库的却是「全程未见口镜」
     这类矛盾不可能同时为真 拿同一份证据把冲突项放同一次调用里重判 迫使模型择一
 
+    :param facts: 客观事实表 抬分前先对表 避免把已确认「未发生」的事实救回来
     :return: 重算后的结果 dict；无冲突或无改动时返回 None 由调用方沿用原结果
     """
     groups = _detect_conflicts(result, audit_type)
@@ -1612,8 +1636,9 @@ def arbitrate_conflicts(
 
     entries = {_normalize_number(e["number"]): e for e in result.get("items") or []}
     by_number = {_normalize_number(item.number): item for item in rubric_items}
+    lookup = _facts_lookup(facts)
     changes: list[dict] = []
-    facts: list[str] = []
+    touched_facts: list[str] = []
     for group in groups:
         targets = [by_number[n] for n in group["numbers"] if n in by_number and n in entries]
         if len(targets) < 2:
@@ -1624,7 +1649,9 @@ def arbitrate_conflicts(
             "请先只依据证据确定这一事实到底成立与否 再按该结论给这几项打分 各项之间不得再自相矛盾。"
         )
         try:
-            patch = _judge_items(targets, audit_type, video_url, evidence, instruction)
+            patch = _judge_items(
+                targets, audit_type, video_url, evidence, instruction, facts=facts
+            )
         except Exception:
             logger.exception("冲突仲裁调用失败 维持原判定: %s", sorted(group["numbers"]))
             continue
@@ -1653,6 +1680,16 @@ def arbitrate_conflicts(
             if score > old and (not reason or _contradicts_full_mark(score, reason, float(item.score))):
                 logger.info("冲突仲裁: 评分项 %s 改判理由缺失或与分数矛盾 维持原判定", item.number)
                 continue
+            # 抬分前先对事实表: 重判拿的是首轮稀疏关键帧 事实表是独立观察 后者更可靠
+            # 实测 144 第 4 项被仲裁抬到 0.15 而事实表写明「口镜全程未被手持」
+            if score > old:
+                violated = _cited_absent_facts(entry, entries[number], lookup)
+                if violated:
+                    logger.info(
+                        "冲突仲裁: 评分项 %s 改判所引事实已确认为未发生 %s 维持原判定",
+                        item.number, [f["id"] for f in violated],
+                    )
+                    continue
             entries[number]["score"] = score
             entries[number]["reason"] = reason
             entries[number]["time"] = str(entry.get("time") or "").strip()
@@ -1662,14 +1699,14 @@ def arbitrate_conflicts(
             })
             touched = True
         if touched:
-            facts.append(group["fact"])
+            touched_facts.append(group["fact"])
 
     if not changes:
         logger.info("冲突仲裁: 检出 %d 组 重判后结论自洽 无需改动", len(groups))
         return None
 
     rebuilt = _rebuild_from_entries(result, rubric_items)
-    rebuilt["conflicts"] = {"groups": len(groups), "facts": facts, "changed": changes}
+    rebuilt["conflicts"] = {"groups": len(groups), "facts": touched_facts, "changed": changes}
     logger.info("冲突仲裁: 检出 %d 组 调整 %d 项", len(groups), len(changes))
     return rebuilt
 

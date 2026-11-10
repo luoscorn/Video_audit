@@ -552,6 +552,16 @@ class ConflictArbitrationTest(unittest.TestCase):
             "summary": "完成度一般",
         }
 
+    def _facts(self, note: str = "托盘内可见口镜 全片未被拿起") -> dict:
+        return {
+            "instruments": [
+                {"id": "F1", "kind": "instrument", "name": "口镜", "occurred": False,
+                 "hand": "无法判断", "time": "无", "note": note},
+            ],
+            "actions": [],
+            "total": 1,
+        }
+
     def test_no_conflict_skips_arbitration(self):
         q._detect_conflicts = lambda *a, **kw: []
         q._judge_items = lambda *a, **kw: self.fail("无冲突不应发起仲裁")
@@ -616,6 +626,72 @@ class ConflictArbitrationTest(unittest.TestCase):
         self.assertEqual(scores["①"], 0.5)
         self.assertEqual(scores["②"], 0.8)
         self.assertEqual([c["number"] for c in voted["conflicts"]["changed"]], ["①"])
+
+    def test_raise_citing_absent_fact_is_rejected(self):
+        # 事实表确认口镜全程未被手持 仲裁拿稀疏关键帧重判不能把这分救回来
+        q._detect_conflicts = lambda *a, **kw: [{"fact": "左手是否持口镜", "numbers": {"①", "②"}}]
+        q._judge_items = lambda targets, *a, **kw: [
+            {"number": "①", "score": 0.5, "reason": "左手持口镜牵拉口角，达标",
+             "time": "@00:22", "fact_ids": ["F1"]},
+            {"number": "②", "score": 1.0, "reason": "左手持口镜", "time": "@00:21"},
+        ]
+        self.assertIsNone(
+            q.arbitrate_conflicts("u", _items(), self._result(), "测试项目", None, self._facts())
+        )
+
+    def test_absent_fact_without_note_does_not_block(self):
+        # 没有依据的否定与「看不清」同义 不得据此拦住仲裁
+        q._detect_conflicts = lambda *a, **kw: [{"fact": "左手是否持口镜", "numbers": {"①", "②"}}]
+        q._judge_items = lambda targets, *a, **kw: [
+            {"number": "①", "score": 0.5, "reason": "左手持口镜牵拉口角，达标",
+             "time": "@00:22", "fact_ids": ["F1"]},
+            {"number": "②", "score": 1.0, "reason": "左手持口镜", "time": "@00:21"},
+        ]
+        voted = q.arbitrate_conflicts(
+            "u", _items(), self._result(), "测试项目", None, self._facts(note="")
+        )
+        self.assertIsNotNone(voted)
+
+    def test_old_entry_citation_is_also_checked(self):
+        # 重判没回填 fact_ids 时沿用原项引用 否则这条约束形同不存在
+        q._detect_conflicts = lambda *a, **kw: [{"fact": "左手是否持口镜", "numbers": {"①", "②"}}]
+        q._judge_items = lambda targets, *a, **kw: [
+            {"number": "①", "score": 0.5, "reason": "左手持口镜牵拉口角，达标", "time": "@00:22"},
+            {"number": "②", "score": 1.0, "reason": "左手持口镜", "time": "@00:21"},
+        ]
+        result = self._result()
+        result["items"][0]["fact_ids"] = ["F1"]
+        self.assertIsNone(q.arbitrate_conflicts("u", _items(), result, "测试项目", None, self._facts()))
+
+    def test_facts_are_forwarded_to_rejudge(self):
+        captured = {}
+        q._detect_conflicts = lambda *a, **kw: [{"fact": "左手是否持口镜", "numbers": {"①", "②"}}]
+
+        def fake(targets, *a, **kw):
+            captured["facts"] = kw.get("facts")
+            return [
+                {"number": "①", "score": 0.5, "reason": "左手持口镜牵拉口角，达标", "time": "@00:22"},
+                {"number": "②", "score": 1.0, "reason": "左手持口镜", "time": "@00:21"},
+            ]
+
+        q._judge_items = fake
+        q.arbitrate_conflicts("u", _items(), self._result(), "测试项目", None, self._facts())
+        self.assertEqual(captured["facts"]["instruments"][0]["name"], "口镜")
+
+    def test_rebuild_keeps_previous_stage_metadata(self):
+        # 仲裁重建结果时 投票/补证/姿态复验留下的痕迹必须跟着走 否则事后无法复盘
+        q._detect_conflicts = lambda *a, **kw: [{"fact": "左手是否持口镜", "numbers": {"①", "②"}}]
+        q._judge_items = lambda targets, *a, **kw: [
+            {"number": "①", "score": 0.5, "reason": "左手持口镜牵拉口角，达标", "time": "@00:22"},
+            {"number": "②", "score": 1.0, "reason": "左手持口镜", "time": "@00:21"},
+        ]
+        result = self._result()
+        result["vote"] = {"items": 1, "changed": []}
+        result["pose_probe"] = {"probed": 1, "changes": []}
+        voted = q.arbitrate_conflicts("u", _items(), result, "测试项目")
+        self.assertIsNotNone(voted)
+        self.assertEqual(voted["vote"], {"items": 1, "changed": []})
+        self.assertEqual(voted["pose_probe"], {"probed": 1, "changes": []})
 
     def test_detect_normalizes_numbers_caps_groups_and_sends_text_only(self):
         captured = {}
