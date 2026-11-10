@@ -977,6 +977,13 @@ class PromptPolicyTest(unittest.TestCase):
         self.assertIn("未填口述视觉权重或权重全部归口述", q._SCORING_POLICY)
         self.assertIn("第 1 档的前提成立", q._EVIDENCE_NOTE)
 
+    def test_weight_wins_when_evidence_column_asks_for_visual(self):
+        # 146 第3项: 权重写“口述100%”而“视频识别依据”要求探针在四象限移动
+        # 第0条表格优先会把 evidence 抬到权重之上 必须显式给出列间冲突的裁决
+        self.assertIn("同一项内各列口径冲突时", q._SCORING_POLICY)
+        self.assertIn("按「口述视觉权重」裁决", q._SCORING_POLICY)
+        self.assertIn("只作佐证", q._SCORING_POLICY)
+
     def test_asr_failure_is_not_silence(self):
         self.assertIn("语音转写失败", q._EVIDENCE_NOTE)
         self.assertIn("语音转写失败", q._SUPPLEMENT_POLICY)
