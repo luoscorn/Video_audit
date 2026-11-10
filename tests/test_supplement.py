@@ -9,6 +9,7 @@
 import logging
 import unittest
 from contextlib import ExitStack
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from services import media_evidence as m
@@ -271,6 +272,77 @@ class ApplyUpdatesTest(unittest.TestCase):
             {"number": "④", "clear": True, "score": 0.2, "reason": "达标"},
         ], [], [])
         self.assertEqual(info["rechecked"], 2)
+
+
+class PoseProbeTest(unittest.TestCase):
+    """姿态类项单问一次: 整单判分写「均悬空」 单问却能给出接触帧"""
+
+    def _result(self) -> dict:
+        def row(number: str, point: str, score: float, reason: str) -> dict:
+            return {**_item(number, score, 0.2, reason), "point": point, "time": "无"}
+
+        return {
+            "items": [
+                row("1", "选用5号镰形探针", 0.2, "探针形态正确"),
+                row("2", "口镜牵拉口角", 0.12, "所有关键帧口镜均悬空"),
+                row("5", "以右手无名指为支点", 0.0, "无名指未抵任何部位"),
+            ],
+            "deductions": [],
+            "total_score": 0.32,
+            "full_score": 0.6,
+        }
+
+    def _rubrics(self) -> list:
+        return [
+            SimpleNamespace(number="1", point="选用5号探针", evidence="", remark="",
+                            oral_visual_weight="口述占20%，视觉占80%；"),
+            SimpleNamespace(number="2", point="口镜牵拉口角", evidence="", remark="",
+                            oral_visual_weight="口述占20%，视觉占80%；"),
+            SimpleNamespace(number="5", point="以右手无名指为支点，支点稳定", evidence="", remark="",
+                            oral_visual_weight="视觉100%；"),
+        ]
+
+    def _evidence(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            duration=60.0,
+            video_path="/tmp/video.mp4",
+            extract_frames_at=lambda *a, **kw: [Frame(seconds=22.0, data="x")],
+        )
+
+    def test_candidates_skip_full_and_oral_weight(self):
+        picked = s._pose_candidates(self._result(), self._rubrics())
+        # 第 1 项已满分、第 2 项带口述份额 只收第 5 项
+        self.assertEqual([item["number"] for item in picked], ["5"])
+
+    def test_seen_pose_raises_to_full_and_recalcs(self):
+        result = self._result()
+        ev = self._evidence()
+        with patch.object(s, "probe_pose_item", return_value={
+            "number": "5", "seen": True, "time": "00:22", "reason": "无名指抵在模型下颌底座"
+        }):
+            info = s.pose_probe_rescore(ev, self._rubrics(), result, "探诊检查")
+        self.assertIsNotNone(info)
+        self.assertEqual(result["items"][2]["score"], 0.2)
+        self.assertIn("无名指", result["items"][2]["reason"])
+        self.assertEqual(info["changes"][0]["from"], 0.0)
+
+    def test_unseen_or_error_keeps_original(self):
+        result = self._result()
+        ev = self._evidence()
+        with patch.object(s, "probe_pose_item", return_value={
+            "number": "5", "seen": False, "time": "无", "reason": "未看到"
+        }):
+            self.assertIsNone(s.pose_probe_rescore(ev, self._rubrics(), result, "探诊检查"))
+        with patch.object(s, "probe_pose_item", side_effect=RuntimeError("超时")):
+            self.assertIsNone(s.pose_probe_rescore(ev, self._rubrics(), result, "探诊检查"))
+        self.assertEqual(result["items"][2]["score"], 0.0)
+
+    def test_window_from_time_hint_or_middle(self):
+        ev = SimpleNamespace(duration=60.0)
+        start, end = s._probe_window(ev, {"time": "00:22"})
+        self.assertTrue(start <= 22 <= end)
+        start, end = s._probe_window(ev, {"time": "无"})
+        self.assertEqual((start, end), (12.0, 48.0))
 
 
 if __name__ == "__main__":

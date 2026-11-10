@@ -300,7 +300,7 @@ _REASON_HEDGE_RE = re.compile(r"部分|基本|大体|个别|局部|仅|但|不�
 _REASON_VERDICT_FAIL_RE = re.compile(
     r"不符(?:合)?(?:要求|标准|规范)|未达标|不达标|未满足|未执行|不得分|"
     r"两手未各持|未见[^。；;]{0,50}分工(?:状态|要求)?|"
-    r"(?:左手|右手)未持(?:口镜|任何器械)"
+    r"(?:左手|右手)未持(?:口镜|任何器械)|未抵(?:住|于|在)?"
 )
 
 
@@ -866,6 +866,152 @@ def _finalize_rubric_result(
         ]
         result, _ = _assemble_result(raw_items + fallback, summary, rubric_items)
     return result
+
+
+# 姿态项聚焦复验: 牵拉、支点这类接触点只占十几个像素 夹在整份评分规则里必然被扫过去
+# 实测同一条视频整单判分写「口镜均悬空、无名指未抵任何部位」
+# 同一批关键帧单独问「盘面是否接触颊侧黏膜」却能给出 00:22/00:36 与所抵部位
+_POSE_ITEM_KEYWORDS = ("牵拉", "支点")
+
+# 两个接触点一次问完 拆成单问时模型常直接照搬评分项的否定结论 一次问两处才肯逐帧找
+# 提问一律用「持口镜那只手」「持探针那只手」定位 不照抄评分项文字里的左右手
+# 实测照抄「以右手无名指为支点」时模型把画面右侧（实际持口镜）认成右手
+# 去错的那只手上找支点 同一条视频因此被判成未做
+_POSE_PROBE_QUESTIONS = (
+    "画面里两只手各持什么器械？长柄末端是圆盘或方镜的是口镜，细长、两端弯曲的针是探针。",
+    "持口镜那只手：镜面是否接触、抵住或撑开模型的口角或颊侧黏膜？接触了写出帧时刻。",
+    "持探针那只手：无名指、小指或中指是否抵在模型底座、邻牙或任何物体上形成对抗？抵住了写出帧时刻。",
+)
+
+_POSE_PROBE_FORMAT = """以 JSON 返回，不要输出多余内容：
+{
+  "instruments": "<两只手各持什么器械>",
+  "mirror_pull": <true|false，持口镜那只手的镜面是否接触、抵住或撑开模型口角或颊侧黏膜>,
+  "mirror_pull_time": "<帧时刻 @mm:ss；没有填 无>",
+  "mirror_pull_note": "<盘面当时在哪里>",
+  "finger_support": <true|false，持探针那只手的无名指/小指/中指是否抵在模型底座、邻牙或任何物体上>,
+  "finger_support_time": "<帧时刻 @mm:ss；没有填 无>",
+  "finger_support_note": "<该手指当时抵在哪里>"
+}"""
+
+# 评分点关键词对应哪个事实: 牵拉看口镜、支点看探针
+_POSE_FACT_BY_KEYWORD = {"牵拉": "mirror_pull", "支点": "finger_support"}
+
+
+def is_pose_item(point: str) -> bool:
+    """是否属于姿态接触类评分点 这类项只看动作出现过没有"""
+    return any(keyword in (point or "") for keyword in _POSE_ITEM_KEYWORDS)
+
+
+def _pose_fact(point: str) -> str:
+    """评分点取哪个事实 认不出来时默认看口镜牵拉"""
+    for keyword, fact in _POSE_FACT_BY_KEYWORD.items():
+        if keyword in (point or ""):
+            return fact
+    return "mirror_pull"
+
+
+def probe_pose_item(
+    audit_type: str,
+    item: dict,
+    frames: list[tuple[str, str]],
+) -> Optional[dict]:
+    """单问一项: 关键帧里该项要求的动作出现了没有
+
+    提示词里不放其他评分项与整份规则：多图加长规则会让模型对单项只扫一眼
+    :param item: 含 number/point/evidence/full_score
+    :param frames: [(帧时刻标签, base64)]
+    :return: {seen, time, reason} 调用失败或解析失败返回 None
+    """
+    if not frames:
+        return None
+    fact = _pose_fact(item["point"])
+    lines = [
+        "以下是同一次操作的视频关键帧，按时间顺序，标签中的 @mm:ss 为该帧准确时刻。",
+        "",
+        f"【本次要核对的动作】{_inline(item['point'])}",
+    ]
+    if item.get("evidence"):
+        lines.append(f"视频识别依据：{_inline(item['evidence'])}")
+    if item.get("remark"):
+        lines.append(f"备注：{_inline(item['remark'])}")
+    lines += [
+        "",
+        "请逐帧看完再依次回答（不要评价分值，也不判断其他评分项）：",
+    ]
+    lines += [
+        f"{index}. {question}" for index, question in enumerate(_POSE_PROBE_QUESTIONS, start=1)
+    ]
+    lines += [
+        "",
+        "注意：评分项文字里的左手右手只是文字，画面里不一定对得上（可能是对镜自拍或机位在前方）。",
+        "请只看持该器械的那只手，不要去找与其左右相符的另一只手。",
+        "描述时统一用「持口镜那只手」「持探针那只手」，不要写左手右手，避免与其他评分项的左右手描述冲突。",
+        "只要任一帧看到接触就算出现，不要求持续、不要求稳定；确实每帧都没接触才填 false。",
+        _POSE_PROBE_FORMAT,
+    ]
+    content: list[dict] = [{"type": "text", "text": "\n".join(lines)}]
+    for label, data in frames:
+        content.append({"type": "text", "text": f"@{label}："})
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{data}"},
+        })
+    content.append({"type": "text", "text": "请以 JSON 返回结论。"})
+
+    system_prompt = (
+        "你是一位严格、客观的口腔医学操作考核考官。本次只确认一项动作是否出现在画面里，"
+        "不评价分值，也不判断其他评分项；先看清两只手各持什么器械，再回答问的是哪只手。"
+        "只依据图片回答，不臆测，不因画面模糊就判定没有出现。"
+    )
+    data = _parse_json(_call_model(system_prompt, content, audit_type))
+    seen = _as_bool(data.get(fact))
+    note = _clean_reason(str(data.get(f"{fact}_note", "")).strip())
+    instruments = _clean_reason(str(data.get("instruments", "")).strip())
+    # 只用本项事实的描述做 reason: instruments 里的左右手常与其他评分项相反
+    reason = note or instruments
+    full = float(item["full_score"])
+    # 说接触到了却说不出盘面/手指在哪里 或 note 写着没有接触 这次复验不可信
+    if seen and (not note or _contradicts_full_mark(full, note, full)):
+        logger.info("姿态复验: 评分项 %s 说已出现但依据为空或与结论相反", item["number"])
+        seen = False
+    return {
+        "number": item["number"],
+        "seen": seen,
+        "time": str(data.get(f"{fact}_time", "")).strip(),
+        "reason": reason,
+    }
+
+
+def rewrite_summary(audit_type: str, result: dict) -> str:
+    """按最终明细重写一句话结论
+
+    summary 是首轮与各项一起生成的 后来被投票/补证/姿态复验改过分之后
+    它仍在写「未使用口镜牵拉」而该项已经满分 只能按最终明细重写
+    无图纯文本 调用很短; 失败时由调用方保留原摘要
+    """
+    items = result.get("items") or []
+    if not items:
+        return ""
+    lines = [
+        f"{item['number']} {item['point']} {float(item['score']):g}/{float(item['full_score']):g}分："
+        f"{_inline(item.get('reason') or '')[:80]}"
+        for item in items
+    ]
+    prompt = (
+        f"【最终评分明细】共 {len(items)} 项，总分 {float(result.get('total_score') or 0):g} / "
+        f"{float(result.get('full_score') or 0):g}\n"
+        + "\n".join(lines)
+        + "\n\n"
+        + f"请根据上述最终明细写一句话总体结论：不超过 {_SUMMARY_MAX_CHARS} 字，直接写结论。\n"
+        + "不得与明细相反：明细里给了满分的项，不得写成未使用、未做到或缺失；"
+        + "只写完成情况与主要失分方向，不罗列分值，不使用表扬、鼓励式表述。只输出这句话。"
+    )
+    return _clean_summary(
+        _call_model("你是口腔医学操作考核的评分审核员，只依据给定明细写结论。", [
+            {"type": "text", "text": prompt},
+        ], audit_type)
+    )
 
 
 # 扣分项投票: 同一份证据换温度重判 逐项取中位数

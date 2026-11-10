@@ -18,7 +18,7 @@ from typing import Optional
 
 from config import settings
 from services.media_evidence import VideoEvidence, cut_clip
-from services.qwen_client import rescore_with_clips
+from services.qwen_client import is_pose_item, probe_pose_item, rescore_with_clips
 from utils.oss_client import delete_object, get_object_url, upload_file
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,7 @@ _CLIP_MAX_SECONDS = 15.0
 _MERGE_GAP_SECONDS = 2.0     # 相邻片段窗口间隔小于该值时合并为一个片段
 _REUSE_OVERLAP_RATIO = 0.6   # 窗口与已有片段重叠度超过该比例时复用同一片段
 _SUPPLEMENT_FRAME_LIMIT = 6  # 每个片段附带的静态关键帧张数 细节判定以这些帧为准
+_POSE_PROBE_WINDOW = (0.2, 0.8)  # 时刻无法定位时取片中段做姿态复验
 
 _TIME_RANGE_RE = re.compile(r"(\d{1,3}):(\d{2})(?:\s*[-~至到]\s*(\d{1,3}):(\d{2}))?")
 _CN_SECONDS_RE = re.compile(r"(?:(\d{1,3})\s*分[钟]?\s*)?(\d+(?:\.\d+)?)\s*秒")
@@ -284,6 +285,109 @@ def _apply_updates(result: dict, updates: list[dict], clips: list[dict],
         "clips": len(clips),
         "changes": change_list,
     }
+
+
+def _pose_candidates(result: dict, rubric_items: list) -> list[dict]:
+    """挑出未满分的姿态类评分项
+
+    只收权重里没有口述份额的项: 口述占一部分时仅凭画面看到只能拿该份额 不能直接给满分
+    """
+    rubric_by_number = {item.number: item for item in rubric_items}
+    picked = []
+    for item in result.get("items") or []:
+        full = float(item.get("full_score") or 0)
+        score = float(item.get("score") or 0)
+        if full <= 0 or score >= full - 0.01:
+            continue
+        if not is_pose_item(item.get("point", "")):
+            continue
+        rubric = rubric_by_number.get(item["number"])
+        weight = str(getattr(rubric, "oral_visual_weight", "") or "")
+        if "口述" in weight:
+            continue
+        picked.append({
+            "number": item["number"],
+            "point": item["point"],
+            "evidence": rubric.evidence if rubric else "",
+            "remark": rubric.remark if rubric else "",
+            "full_score": full,
+            "time": item.get("time", ""),
+        })
+    return picked
+
+
+def _probe_window(evidence: VideoEvidence, item: dict) -> tuple[float, float]:
+    """姿态复验的取帧窗口: 有证据时刻就用片段窗口 没有就取片中段"""
+    hint = _parse_time_hint(item.get("time", ""), evidence.duration)
+    if hint is not None:
+        return _clip_window(hint[0], hint[1], evidence.duration)
+    return (
+        round(evidence.duration * _POSE_PROBE_WINDOW[0], 2),
+        round(evidence.duration * _POSE_PROBE_WINDOW[1], 2),
+    )
+
+
+def pose_probe_rescore(
+    evidence: VideoEvidence,
+    rubric_items: list,
+    result: dict,
+    audit_type: str,
+) -> Optional[dict]:
+    """姿态类评分项聚焦复验: 把一项单独拿出来问画面里有没有该动作
+
+    首轮把所有评分项与整份规则一起送进去 接触点只有十几个像素 模型对单项只扫一眼
+    实测同一视频整单判「口镜均悬空、无名指未抵任何部位」 单问却能看到
+    只升不降: 未看到或调用失败一律保留原判
+    """
+    if not settings.MEDIA_POSE_PROBE_ENABLED or not evidence.video_path:
+        return None
+    candidates = _pose_candidates(result, rubric_items)
+    if not candidates:
+        return None
+
+    by_number = {item["number"]: item for item in result.get("items") or []}
+    changed = []
+    probed = 0
+    for cand in candidates:
+        start, end = _probe_window(evidence, cand)
+        frames = evidence.extract_frames_at(
+            start, end,
+            int(settings.MEDIA_POSE_PROBE_FRAMES or 0),
+            edge=settings.MEDIA_SUPPLEMENT_FRAME_WIDTH,
+        )
+        if not frames:
+            continue
+        probed += 1
+        try:
+            got = probe_pose_item(audit_type, cand, [(f.label, f.data) for f in frames])
+        except Exception as exc:
+            logger.warning("姿态复验失败 %s: %s", cand["number"], exc)
+            continue
+        if not got or not got["seen"]:
+            continue
+        item = by_number.get(got["number"])
+        if item is None:
+            continue
+        old = float(item["score"])
+        full = float(item["full_score"])
+        item["score"] = full
+        if got["reason"]:
+            item["reason"] = got["reason"]
+        item["recheck"] = "姿态复验：画面确认该动作出现"
+        changed.append({
+            "number": item["number"],
+            "point": item["point"],
+            "from": old,
+            "to": full,
+            "reason": got["reason"],
+        })
+        logger.info("姿态复验: 评分项 %s %s → %s", item["point"], old, full)
+
+    if not changed:
+        return None
+    _recalc_totals(result)
+    result["pose_probe"] = {"probed": probed, "changed": changed}
+    return {"probed": probed, "changes": changed}
 
 
 def supplement_rescore(

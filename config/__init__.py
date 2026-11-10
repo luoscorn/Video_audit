@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     # 补证是链路最后一环 它改完分数后没人回头检查其余项 矛盾结论会直接入库
     # 检测只走纯文本 无矛盾时不花带证据的调用
     MEDIA_CONFLICT_ENABLED: bool = True
+    # 姿态项聚焦复验: 牵拉/支点这类接触点只有十几个像素 放在整份评分规则里判必然扫不到
+    # 实测同一视频整单判分写「所有帧均悬空」 单问「盘面是否接触颊黏膜」却能给出准确帧时刻
+    # 未满分的姿态项各花一次调用 项数通常 1~2 项
+    MEDIA_POSE_PROBE_ENABLED: bool = True
+    MEDIA_POSE_PROBE_FRAMES: int = 12
     # 千问思考模式: 把推理挪出 reason 字段 但更慢更贵 效果未经 A/B 确认前默认关闭
     QWEN_ENABLE_THINKING: bool = False
     QWEN_THINKING_BUDGET: int = 4096

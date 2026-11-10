@@ -956,6 +956,91 @@ class PromptPolicyTest(unittest.TestCase):
         self.assertIn("summary 不得与 items 明细相反", q._SCORING_POLICY)
 
 
+class PoseProbePromptTest(unittest.TestCase):
+    """姿态类项单问一次: 需要压掉整份规则与其他项的干扰"""
+
+    def setUp(self):
+        self._call = q._call_model
+
+    def tearDown(self):
+        q._call_model = self._call
+
+    def test_pose_item_detection(self):
+        self.assertTrue(q.is_pose_item("口镜牵拉口角，按指定牙位检查。"))
+        self.assertTrue(q.is_pose_item("以右手无名指为支点，支点稳定"))
+        self.assertFalse(q.is_pose_item("选用5号镰形探针。"))
+
+    def test_seen_pose_returns_frame_time_and_reason(self):
+        captured = {}
+
+        def fake(system_prompt, content, audit_type, temperature=q._DEFAULT_TEMPERATURE):
+            captured["prompt"] = content[0]["text"]
+            return json.dumps({
+                "instruments": "左手持探针、右手持长柄圆盘口镜",
+                "mirror_pull": True, "mirror_pull_time": "00:22",
+                "mirror_pull_note": "盘面抵在模型左侧颊黏膜",
+                "finger_support": False, "finger_support_time": "无",
+                "finger_support_note": "无名指悬空",
+            })
+
+        q._call_model = fake
+        got = q.probe_pose_item(
+            "探诊检查",
+            {"number": "②", "point": "口镜牵拉口角", "full_score": 0.2},
+            [("00:22", "x")],
+        )
+        self.assertTrue(got["seen"])
+        self.assertEqual(got["time"], "00:22")
+        self.assertIn("盘面抵在", got["reason"])
+        # 两项事实分开记: 支点没做不能拖累牵拉
+        self.assertNotIn("无名指悬空", got["reason"])
+        # 只带这一项与帧 不能把整份评分规则塞回去
+        self.assertIn("口镜牵拉口角", captured["prompt"])
+        self.assertNotIn("选用5号", captured["prompt"])
+
+    def test_support_item_reads_its_own_fact(self):
+        q._call_model = lambda *a, **kw: json.dumps({
+            "instruments": "左手持探针",
+            "mirror_pull": False, "mirror_pull_time": "无", "mirror_pull_note": "盘面悬空",
+            "finger_support": True, "finger_support_time": "00:24",
+            "finger_support_note": "无名指抵在模型下颌底座外侧",
+        })
+        got = q.probe_pose_item(
+            "探诊检查",
+            {"number": "⑤", "point": "以右手无名指为支点，支点稳定", "full_score": 0.2},
+            [("00:24", "x")],
+        )
+        self.assertTrue(got["seen"])
+        self.assertEqual(got["time"], "00:24")
+
+    def test_questions_point_at_the_hand_holding_the_tool(self):
+        # 照抄评分项里的「右手无名指」会让模型去画面右侧（实际持口镜）那只手上找支点
+        text = "\n".join(q._POSE_PROBE_QUESTIONS)
+        self.assertIn("持口镜那只手", text)
+        self.assertIn("持探针那只手", text)
+        self.assertNotIn("右手无名指是否", text)
+
+    def test_seen_with_negative_note_is_rejected(self):
+        q._call_model = lambda *a, **kw: json.dumps({
+            "instruments": "左手持探针",
+            "mirror_pull": False, "mirror_pull_time": "无", "mirror_pull_note": "盘面悬空",
+            "finger_support": True, "finger_support_time": "00:22",
+            "finger_support_note": "无名指未抵任何部位",
+        })
+        got = q.probe_pose_item(
+            "探诊检查",
+            {"number": "⑤", "point": "无名指支点", "full_score": 0.2},
+            [("00:22", "x")],
+        )
+        self.assertFalse(got["seen"])
+
+    def test_no_frames_skips_call(self):
+        q._call_model = lambda *a, **kw: self.fail("无帧时不应发起调用")
+        self.assertIsNone(q.probe_pose_item(
+            "探诊检查", {"number": "⑤", "point": "无名指支点", "full_score": 0.2}, [],
+        ))
+
+
 class TrimReasoningQuoteTest(unittest.TestCase):
     def test_quoted_question_is_kept(self):
         # 引号里的问句是考生原话 在那里截断会把后半句的结论一起丢掉

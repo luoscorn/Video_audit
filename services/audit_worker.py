@@ -17,13 +17,14 @@ from db.db import (
 )
 from services.qwen_client import (
     arbitrate_conflicts,
+    rewrite_summary,
     score_video,
     score_video_with_rubric,
     vote_deducted_items,
 )
 from services.asr_client import build_asr_context
 from services.media_evidence import prepare_evidence
-from services.supplement import supplement_rescore
+from services.supplement import pose_probe_rescore, supplement_rescore
 from utils.audit_type import AuditType
 from utils.score_grade import attach_grade
 from utils.score_rules import load_rule_bundle
@@ -322,6 +323,35 @@ async def _process_audit_task(task_id: int) -> None:
                 except Exception as exc:
                     logger.warning("[Worker]   二次补证失败 沿用第一轮结果: %s", exc)
 
+            # 5.55 姿态项聚焦复验：牵拉、无名指支点这类接触点夹在整份规则里会被直接扫过去
+            #      把单项单独拿出来问「画面里有没有这个动作」 看到即满分 看不到保留原判
+            if settings.MEDIA_POSE_PROBE_ENABLED and rubric_items and evidence is not None:
+                probe_start = time.time()
+                try:
+                    probe_info = await asyncio.to_thread(
+                        pose_probe_rescore,
+                        evidence,
+                        rubric_items,
+                        result,
+                        task.audit_type,
+                    )
+                    if probe_info is None:
+                        logger.info("[Worker]   姿态复验: 无需复验或未看到 (耗时 %.1fs)", time.time() - probe_start)
+                    else:
+                        logger.info(
+                            "[Worker]   姿态复验: 复验%d项 修正%d项 (耗时 %.1fs)",
+                            probe_info["probed"],
+                            len(probe_info["changes"]),
+                            time.time() - probe_start,
+                        )
+                        for change in probe_info["changes"]:
+                            logger.info(
+                                "[Worker]   ~ %s: %s → %s",
+                                change["point"], change["from"], change["to"],
+                            )
+                except Exception as exc:
+                    logger.warning("[Worker]   姿态复验失败 沿用原结果: %s", exc)
+
             # 5.6 冲突仲裁：各项判定对同一事实给出相反结论时拿同一份证据重判这几项
             #     实测补证把第 4 项改成「左手持口镜」后 第 2 项仍带着「全程未见口镜」一起入库
             #     检测只走纯文本 只在真检出冲突时才花带证据的那一次调用
@@ -357,6 +387,17 @@ async def _process_audit_task(task_id: int) -> None:
                             )
                 except Exception as exc:
                     logger.warning("[Worker]   冲突仲裁失败 沿用原结果: %s", exc)
+
+            # 5.7 摘要按最终明细重写：首轮摘要与后来改过的分数会互相矛盾
+            #     实测第 2、4 项已给满分 摘要却写「未使用口镜牵拉、左手未持口镜」
+            if any(result.get(key) for key in ("vote", "supplement", "pose_probe", "conflicts")):
+                try:
+                    rewritten = await asyncio.to_thread(rewrite_summary, task.audit_type, result)
+                    if rewritten:
+                        result["summary"] = rewritten
+                        logger.info("[Worker]   摘要已按最终明细重写: %s", rewritten)
+                except Exception as exc:
+                    logger.warning("[Worker]   摘要重写失败 保留首轮摘要: %s", exc)
 
             total_score = result.get("total_score", 0)
             full_score = result.get("full_score", 0)
