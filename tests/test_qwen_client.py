@@ -935,6 +935,26 @@ class PromptPolicyTest(unittest.TestCase):
         self.assertIn("左手未持口镜", q._CONFLICT_POLICY)
         self.assertIn("两项评分点不同并不影响", q._CONFLICT_POLICY)
 
+    def test_pose_items_answer_only_requires_one_sighting(self):
+        # 139 实测: 口镜牵拉被判「非持续」扣分、无名指支点被判 0
+        # 姿态类评分点只要出现过就算做到 不因持续时间与稳定性扣分
+        self.assertIn("只要任一关键帧出现过该姿态", q._SCORING_POLICY)
+        self.assertIn("不要求持续时长", q._SCORING_POLICY)
+        self.assertIn("「非持续」「偶有悬空」「未同步维持」", q._SCORING_POLICY)
+        # 「支点不稳」不能再出现在必须扣分清单里
+        self.assertNotIn("明确缺少支点或支点不稳", q._SCORING_POLICY)
+
+    def test_item_rules_allow_single_occurrence(self):
+        pulled = dict(q._ITEM_RULES)[("牵拉", "口角")]
+        self.assertIn("只要任一关键帧出现过牵拉动作就给满分", pulled)
+        support = dict(q._ITEM_RULES)[("支点",)]
+        self.assertIn("只要任一关键帧看到该指抵住任何部位就认定支点达成并给满分", support)
+        self.assertIn("不得直接判 0", support)
+
+    def test_summary_must_not_contradict_items(self):
+        # 139 的 summary 写「未使用口镜牵拉口角 左手未持口镜」 而第 4 项已判满分
+        self.assertIn("summary 不得与 items 明细相反", q._SCORING_POLICY)
+
 
 class TrimReasoningQuoteTest(unittest.TestCase):
     def test_quoted_question_is_kept(self):
